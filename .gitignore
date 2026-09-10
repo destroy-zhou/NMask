@@ -1,0 +1,57 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.ipynb_checkpoints/
+*.egg-info/
+/build/
+/dist/
+.coverage
+.coverage.*
+/htmlcov/
+
+# Local Python environments and secrets
+.venv/
+.venv-*/
+venv/
+env/
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Downloaded datasets (keep ts_benchmark/data source code)
+/dataset/
+/datasets/
+
+# Generated experiment outputs
+/result/
+/results/
+/test_results/
+/logs/
+/runs/
+/wandb/
+/checkpoints/
+/pretrained_models/
+/outputs/
+/pic/
+*.log
+nohup.out
+events.out.tfevents.*
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
