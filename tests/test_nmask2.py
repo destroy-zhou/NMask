@@ -118,6 +118,7 @@ class Nmask2Tests(unittest.TestCase):
         self.assertIsInstance(factories[0](), Nmask2)
         self.assertEqual(factories[0]().model_name, "Nmask2")
         self.assertEqual(Nmask2(seq_len=16).config.channel_attn_mode, "rope")
+        self.assertTrue(Nmask2(seq_len=16).config.use_future_exog)
         with self.assertRaisesRegex(ValueError, "channel_attn_mode"):
             Nmask2(seq_len=16, channel_attn_mode="invalid")
 
@@ -135,6 +136,7 @@ class Nmask2Tests(unittest.TestCase):
             old_params = json.loads(before[before.index("--model-hyper-params") + 1])
             new_params = json.loads(after[after.index("--model-hyper-params") + 1])
             self.assertEqual(new_params.pop("channel_attn_mode"), "rope")
+            self.assertTrue(new_params.pop("use_future_exog"))
             self.assertEqual(new_params, old_params)
             self.assertEqual(after[after.index("--model-name") + 1], "nmask2.Nmask2")
 

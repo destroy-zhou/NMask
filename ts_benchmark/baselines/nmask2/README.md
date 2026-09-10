@@ -18,7 +18,8 @@ first, then exogenous channels. Keep that variable order consistent between
 training and prediction.
 
 The default `rope` mode has the same parameter layout and forward behavior as
-the original nmask. Train the other modes separately for a meaningful ablation;
+the original nmask when other settings, including `use_future_exog`, match.
+Train the other modes separately for a meaningful ablation;
 changing the mode after training is not an equivalent experiment. Checkpoints
 from `embedding` mode include its additional embedding parameters.
 
@@ -34,9 +35,10 @@ The script contains the same 24 independent experiment commands as `nmask.sh`,
 using `--model-name "nmask2.Nmask2"` and `"channel_attn_mode": "rope"`.
 To compare modes, change that parameter to `"none"` or `"embedding"`, and
 change the save-path suffix to the corresponding mode to separate results.
-All other parameters are preserved, including `use_future_exog=False` by
-default. If testing known-future covariates, explicitly set
-`"use_future_exog": true` consistently in every compared configuration.
+Other experiment parameters are preserved. `use_future_exog=True` is the
+model default and is explicitly set in the script, matching the current
+server nmask setting. For historical-only experiments, set it to `false`.
+Keep this setting identical across all compared channel attention modes.
 The new option affects the active `TC_EncDec.py` model path; copied experimental
 encoder variants are retained for reference.
 
