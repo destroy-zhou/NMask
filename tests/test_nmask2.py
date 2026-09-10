@@ -10,6 +10,7 @@ from ts_benchmark.baselines.nmask import Nmask
 from ts_benchmark.baselines.nmask.models.nmask_model import NmaskModel
 from ts_benchmark.baselines.nmask2 import Nmask2
 from ts_benchmark.baselines.nmask2.models.nmask2_model import Nmask2Model
+from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import LocalSummaryAttention
 from ts_benchmark.models.model_loader import get_models
 
 
@@ -18,13 +19,14 @@ class Nmask2Tests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(2)
 
-    def make_model(self, mode="rope", future=True, original=False, d_model=16, heads=2):
+    def make_model(self, mode="rope", future=True, original=False, d_model=16, heads=2, **options):
         adapter_type = Nmask if original else Nmask2
         params = dict(seq_len=16, horizon=8, patch_len=4, stride=4,
                       d_model=d_model, d_ff=32, n_heads=heads, e_layers=2,
                       dropout=0.0, alpha=0.0, use_future_exog=future)
         if not original:
             params["channel_attn_mode"] = mode
+        params.update(options)
         adapter = adapter_type(**params)
         adapter.config.enc_in = 5
         adapter.config.series_dim = 2
@@ -139,6 +141,101 @@ class Nmask2Tests(unittest.TestCase):
             self.assertTrue(new_params.pop("use_future_exog"))
             self.assertEqual(new_params, old_params)
             self.assertEqual(after[after.index("--model-name") + 1], "nmask2.Nmask2")
+
+    def test_local_summary_forward_backward_all_modes(self):
+        for mode in ("rope", "none", "embedding"):
+            for future in (False, True):
+                with self.subTest(mode=mode, future=future):
+                    model = self.make_model(mode, future, channel_attn_type="local_summary",
+                                            channel_window=5, channel_summaries=2)
+                    x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                    output, auxiliary = model(x, exog, None)
+                    self.assertEqual(output.shape, (2, 8, 2))
+                    (output.square().mean() + auxiliary).backward()
+                    for layer in model.temporal_encoder.encoder_x.attn_layers:
+                        self.assertTrue(layer.attention.use_rope)
+                        self.assertIsNone(layer.c_attention)
+                        attention = layer.local_channel_attention
+                        self.assertGreater(attention.gate_query.weight.grad.abs().sum().item(), 0)
+                        self.assertTrue(torch.isfinite(attention.key_projection.weight.grad).all())
+                        if mode == "embedding":
+                            self.assertTrue((attention.channel_embedding.grad.abs().sum(-1) > 0).all())
+
+    def test_local_summary_matches_explicit_reference_at_boundaries(self):
+        # Direct per-position/per-variable evaluation checks sparse gathering,
+        # boundary masking, summary count clamping and both normalization stages.
+        for mode, window, summaries in (("none", 5, 2), ("embedding", 1, 0), ("rope", 5, 8)):
+            with self.subTest(mode=mode, window=window, summaries=summaries):
+                module = LocalSummaryAttention(8, 2, 4, 2, window, summaries, mode).double()
+                x = torch.randn(2, 4, 3, 8, dtype=torch.float64)
+                qk = x if module.channel_embedding is None else x + module.channel_embedding
+                q = module.query_projection(qk).reshape(2, 4, 3, 2, 4)
+                k = module.key_projection(qk).reshape(2, 4, 3, 2, 4)
+                v = module.value_projection(x).reshape(2, 4, 3, 2, 4)
+                if module.rope is not None:
+                    q, k = module._rotate_channels(q), module._rotate_channels(k)
+                count = min(summaries, 3)
+                if count:
+                    sk = module._pool(k[:, 2:].permute(0, 1, 3, 2, 4), count)
+                    sv = module._pool(v[:, 2:].permute(0, 1, 3, 2, 4), count)
+                expected = torch.empty(2, 2, 3, 8, dtype=torch.float64)
+                for batch in range(2):
+                    for target in range(2):
+                        for position in range(3):
+                            contexts = []
+                            for variable in range(2, 4):
+                                start, stop = max(0, position - window // 2), min(3, position + window // 2 + 1)
+                                keys = k[batch, variable, start:stop].transpose(0, 1)
+                                values = v[batch, variable, start:stop].transpose(0, 1)
+                                if count:
+                                    keys = torch.cat([keys, sk[batch, variable - 2]], dim=1)
+                                    values = torch.cat([values, sv[batch, variable - 2]], dim=1)
+                                scores = (q[batch, target, position, :, None] * keys).sum(-1) / 2
+                                context = (scores.softmax(-1).unsqueeze(-1) * values).sum(1).flatten()
+                                contexts.append(context)
+                            contexts = torch.stack(contexts)
+                            gate_keys = contexts
+                            if module.channel_embedding is not None:
+                                identities = torch.nn.functional.linear(module.channel_embedding[0, 2:, 0], module.key_projection.weight)
+                                gate_keys = gate_keys + identities
+                            gate = (module.gate_query(qk[batch, target, position]) * gate_keys).sum(-1) / (8 ** 0.5)
+                            expected[batch, target, position] = module.out_projection((gate.softmax(-1)[:, None] * contexts).sum(0))
+                torch.testing.assert_close(module(x), expected, rtol=1e-9, atol=1e-9)
+
+    def test_locality_global_summary_and_variable_permutation(self):
+        torch.manual_seed(3)
+        module = LocalSummaryAttention(8, 2, 4, 1, window=3, summaries=0, mode="none").eval()
+        x = torch.randn(2, 4, 9, 8)
+        changed = x.clone()
+        changed[:, 1:, -1] += 10
+        with torch.no_grad():
+            original = module(x)
+            local = module(changed)
+            torch.testing.assert_close(original[:, :, 0], local[:, :, 0], rtol=0, atol=0)
+            permuted = module(x[:, [0, 3, 1, 2]])
+            torch.testing.assert_close(original, permuted)
+            module.summaries = 1
+            self.assertGreater((module(x)[:, :, 0] - module(changed)[:, :, 0]).abs().max().item(), 1e-5)
+
+    def test_local_summary_short_sequence_checkpoint_and_batching(self):
+        module = LocalSummaryAttention(8, 2, 3, 1, window=5, summaries=4, mode="embedding").eval()
+        restored = LocalSummaryAttention(8, 2, 3, 1, window=5, summaries=4, mode="embedding").eval()
+        restored.load_state_dict(module.state_dict())
+        x = torch.randn(3, 3, 1, 8)
+        with torch.no_grad():
+            expected = module(x)
+            self.assertTrue(torch.isfinite(expected).all())
+            torch.testing.assert_close(expected, restored(x), rtol=0, atol=0)
+            torch.testing.assert_close(expected[:1], restored(x[:1]))
+
+    def test_local_summary_invalid_options(self):
+        for options in ({"channel_attn_type": "bad"}, {"channel_window": 0},
+                        {"channel_window": 4}, {"channel_window": True},
+                        {"channel_summaries": -1}, {"channel_summaries": 1.5}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                Nmask2(seq_len=16, **options)
+        with self.assertRaisesRegex(ValueError, "covariate"):
+            LocalSummaryAttention(8, 2, 1, 1)
 
 
 if __name__ == "__main__":

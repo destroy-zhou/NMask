@@ -41,6 +41,9 @@ class Nmask2Model(nn.Module):
             predict_method=config.predict_method,
             use_future_exog=config.use_future_exog,
             channel_attn_mode=config.channel_attn_mode,
+            channel_attn_type=config.channel_attn_type,
+            channel_window=config.channel_window,
+            channel_summaries=config.channel_summaries,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

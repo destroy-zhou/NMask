@@ -25,11 +25,12 @@ class ConvLayer(nn.Module):
 
 class EncoderLayer(nn.Module):
     def __init__(self, attention, c_attention, d_model, d_ff=None, dropout=0.1, activation="relu",
-                 n_channels=None):
+                 n_channels=None, local_channel_attention=None):
         super(EncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention = attention
         self.c_attention = c_attention
+        self.local_channel_attention = local_channel_attention
         self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
         self.norm1 = nn.LayerNorm(d_model)
@@ -59,7 +60,15 @@ class EncoderLayer(nn.Module):
         # y = x = self.norm1(x)
         x = self.norm1(x)
 
-        if self.c_attention is not None:
+        if self.local_channel_attention is not None:
+            patches = x.reshape(-1, c, l, d)
+            update = self.local_channel_attention(patches)
+            targets = self.local_channel_attention.target_channels
+            updated_targets = self.c_norm(patches[:, :targets] + self.dropout(update))
+            # Covariates remain temporal features; only targets receive cross-variable updates.
+            x = torch.cat([updated_targets, patches[:, targets:]], dim=1).reshape(-1, l, d)
+            y = x
+        elif self.c_attention is not None:
             x = x.view(-1, c, l, d).permute(0,2,1,3).contiguous().view(-1, c, d)
             qk = x
             if self.channel_embedding is not None:

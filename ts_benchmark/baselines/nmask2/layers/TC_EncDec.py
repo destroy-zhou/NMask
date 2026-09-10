@@ -6,6 +6,7 @@ import numpy as np
 from ts_benchmark.baselines.nmask2.layers.Embed import PatchEmbedding, CompressAndProject, PositionalEmbedding
 from ts_benchmark.baselines.nmask2.layers.SelfAttention_Family import FullAttention, AttentionLayer
 from ts_benchmark.baselines.nmask2.layers.Transformer_EncDec import Encoder, EncoderLayer
+from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import LocalSummaryAttention, validate_channel_attention
 
 
 class FlattenHead(nn.Module):
@@ -39,7 +40,8 @@ class TemporalCausalityEncoder(nn.Module):
     def __init__(self, enc_in, seq_len, pred_len, series_dim,
                  patch_len, stride, d_model, d_ff, n_heads, e_layers,
                  dropout, factor, activation, pad_method, predict_method, use_future_exog, use_rope=True,
-                 channel_attn_mode="rope"
+                 channel_attn_mode="rope", channel_attn_type="full",
+                 channel_window=5, channel_summaries=4
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -54,6 +56,9 @@ class TemporalCausalityEncoder(nn.Module):
         if channel_attn_mode not in ("rope", "none", "embedding"):
             raise ValueError("channel_attn_mode must be one of: rope, none, embedding")
         self.channel_attn_mode = channel_attn_mode
+        validate_channel_attention(channel_attn_type, channel_window, channel_summaries)
+        self.channel_attn_type = channel_attn_type
+        self.channel_window, self.channel_summaries = channel_window, channel_summaries
         stride = patch_len
         padding = stride
         future_patch_num = int((pred_len - patch_len) / stride + 2)
@@ -335,12 +340,17 @@ class TemporalCausalityEncoder(nn.Module):
                         d_keys=channel_head_dim,
                         d_values=channel_head_dim,
                         use_rope=use_rope and self.channel_attn_mode == "rope",
-                    ),
+                    ) if self.channel_attn_type == "full" else None,
                     d_model,
                     d_ff,
                     dropout=dropout,
                     activation=activation,
-                    n_channels=self.c_in if self.channel_attn_mode == "embedding" else None,
+                    n_channels=self.c_in if self.channel_attn_type == "full" and self.channel_attn_mode == "embedding" else None,
+                    local_channel_attention=LocalSummaryAttention(
+                        d_model, n_heads, self.c_in, self.series_dim,
+                        window=self.channel_window, summaries=self.channel_summaries,
+                        mode=self.channel_attn_mode, dropout=dropout, head_dim=channel_head_dim,
+                    ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)
             ],

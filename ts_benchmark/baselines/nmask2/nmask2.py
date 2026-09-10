@@ -1,6 +1,7 @@
 import torch.nn as nn
 
 from ts_benchmark.baselines.nmask2.models.nmask2_model import Nmask2Model
+from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import validate_channel_attention
 from ts_benchmark.baselines.utils import (
     DBLoss,
 )
@@ -37,6 +38,9 @@ MODEL_HYPER_PARAMS = {
 
     "infer_use_future": False,
     "channel_attn_mode": "rope",  # rope | none | embedding
+    "channel_attn_type": "full",  # full | local_summary
+    "channel_window": 5,
+    "channel_summaries": 4,
 
 }
 
@@ -55,6 +59,8 @@ class Nmask2(DeepForecastingModelBase):
 
     def __init__(self, **kwargs):
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+        validate_channel_attention(self.config.channel_attn_type,
+                                   self.config.channel_window, self.config.channel_summaries)
         if self.config.channel_attn_mode not in ("rope", "none", "embedding"):
             raise ValueError(
                 "channel_attn_mode must be one of: rope, none, embedding; "
