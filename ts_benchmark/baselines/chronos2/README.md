@@ -44,20 +44,17 @@ The batch path receives known future covariates from the benchmark; no future
 target values are supplied. The single-window `forecast` method accepts
 historical `covariates['exog']` and optional `covariates['exog_future']`.
 
-`GPU=1 BATCH_SIZE=8 MODEL_BATCH_SIZE=128 bash scripts/covariate_forecasting/Chronos2.sh`
-selects a GPU and reduces memory use. `batch_size` counts rolling windows;
+Like `nmask.sh`, the script contains one complete command per experiment and
+must be run from the repository root. Edit `--gpus`, `batch_size` and
+`model_batch_size` directly in each command to select a GPU or reduce memory
+use. `batch_size` counts rolling windows;
 `model_batch_size` counts target and covariate channels in the official pipeline.
 Long rolling evaluations can take substantial time; the script preserves the
 original maximum 48,000 windows instead of silently reducing evaluation size.
 
 Run adapter regression checks with `python -m unittest discover -s tests -p 'test_chronos2.py'`.
 
-For a quick GPU smoke test on all 24 configurations (three rolling windows
-each, including a partial batch), run:
-
-```bash
-NUM_ROLLINGS=3 BATCH_SIZE=2 RUN_NAME=smoke bash scripts/covariate_forecasting/Chronos2.sh
-```
-
-This saves smoke results separately from the full evaluation. Unset
-`NUM_ROLLINGS` to use the original full evaluation configuration.
+For a quick smoke test, add `"num_rollings": 3` to a command's
+`--strategy-args`, set `"batch_size": 2` in `--model-hyper-params`, and
+change its `--save-path` suffix from `zero_shot` to `smoke`. The commands in
+the checked-in script use the original full evaluation configuration.
