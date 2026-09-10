@@ -51,3 +51,13 @@ Long rolling evaluations can take substantial time; the script preserves the
 original maximum 48,000 windows instead of silently reducing evaluation size.
 
 Run adapter regression checks with `python -m unittest discover -s tests -p 'test_chronos2.py'`.
+
+For a quick GPU smoke test on all 24 configurations (three rolling windows
+each, including a partial batch), run:
+
+```bash
+NUM_ROLLINGS=3 BATCH_SIZE=2 RUN_NAME=smoke bash scripts/covariate_forecasting/Chronos2.sh
+```
+
+This saves smoke results separately from the full evaluation. Unset
+`NUM_ROLLINGS` to use the original full evaluation configuration.
