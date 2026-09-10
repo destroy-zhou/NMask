@@ -1,6 +1,7 @@
 """Zero-shot Chronos-2 adapter with known-future covariates."""
 
 from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -34,13 +35,21 @@ class Chronos2(ModelBase):
 
     def _load_pipeline(self):
         if self.pipeline is None:
+            if sys.version_info < (3, 10):
+                raise ImportError(
+                    f"Chronos2 requires Python >=3.10; current Python is "
+                    f"{sys.version.split()[0]} ({sys.executable})."
+                )
             try:
                 import torch
                 from chronos import Chronos2Pipeline
             except ImportError as exc:
                 raise ImportError(
-                    "Chronos2 requires Python >=3.10 and the dependencies in "
-                    "ts_benchmark/baselines/chronos2/requirements.txt"
+                    f"Chronos2 dependency import failed in {sys.executable} "
+                    f"(Python {sys.version.split()[0]}): {type(exc).__name__}: {exc}. "
+                    "Activate the configured .venv-chronos2 environment, or install "
+                    "ts_benchmark/baselines/chronos2/requirements.txt using this "
+                    "interpreter's -m pip install -r command."
                 ) from exc
             device = self.device_map
             if device == "auto":
