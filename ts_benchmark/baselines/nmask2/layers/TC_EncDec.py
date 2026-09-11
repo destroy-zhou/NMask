@@ -7,6 +7,9 @@ from ts_benchmark.baselines.nmask2.layers.Embed import PatchEmbedding, CompressA
 from ts_benchmark.baselines.nmask2.layers.SelfAttention_Family import FullAttention, AttentionLayer
 from ts_benchmark.baselines.nmask2.layers.Transformer_EncDec import Encoder, EncoderLayer
 from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import LocalSummaryAttention, validate_channel_attention
+from ts_benchmark.baselines.nmask2.layers.CovariateDecoder import (
+    build_covariate_encoder, TargetDecoder, TargetDecoderLayer,
+)
 
 
 class FlattenHead(nn.Module):
@@ -40,9 +43,10 @@ class TemporalCausalityEncoder(nn.Module):
     def __init__(self, enc_in, seq_len, pred_len, series_dim,
                  patch_len, stride, d_model, d_ff, n_heads, e_layers,
                  dropout, factor, activation, pad_method, predict_method, use_future_exog, use_rope=True,
-                 channel_attn_mode="rope", channel_attn_type="full",
-                 channel_window=5, channel_summaries=4, local_time_rope=True,
-                 temporal_attn_scope="all"
+                 channel_attn_mode="rope", channel_attn_type="local_summary",
+                 channel_window=1, channel_summaries=4, local_time_rope=True,
+                 temporal_attn_scope="target_only", architecture="encoder_decoder",
+                 covariate_layers=1
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -54,6 +58,16 @@ class TemporalCausalityEncoder(nn.Module):
         self.predict_method = predict_method
         self.use_future_exog = use_future_exog
         self.use_rope = use_rope
+        if architecture not in ("encoder_decoder", "joint"):
+            raise ValueError("architecture must be encoder_decoder or joint")
+        self.architecture = architecture
+        if architecture == "encoder_decoder":
+            if not 0 < series_dim < enc_in:
+                raise ValueError("encoder_decoder requires at least one target and one covariate")
+            if channel_attn_type != "local_summary" or temporal_attn_scope != "target_only":
+                raise ValueError("encoder_decoder requires channel_attn_type=local_summary and temporal_attn_scope=target_only")
+            if isinstance(covariate_layers, bool) or not isinstance(covariate_layers, int) or covariate_layers < 1:
+                raise ValueError("covariate_layers must be a positive integer")
         if channel_attn_mode not in ("rope", "none", "embedding"):
             raise ValueError("channel_attn_mode must be one of: rope, none, embedding")
         self.channel_attn_mode = channel_attn_mode
@@ -83,10 +97,22 @@ class TemporalCausalityEncoder(nn.Module):
         #     d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=True,
         #     factor=factor, e_layers=e_layers, use_rope=use_rope
         # )
-        self.encoder_x = self._build_encoder(
-            d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=False,
-            factor=factor, e_layers=e_layers, use_rope=use_rope
-        )
+        if self.architecture == "encoder_decoder":
+            self.covariate_encoder = build_covariate_encoder(
+                d_model, d_ff, n_heads, covariate_layers, dropout, factor, activation, use_rope,
+            )
+            self.target_decoder = TargetDecoder([
+                TargetDecoderLayer(
+                    d_model, d_ff, n_heads, enc_in, series_dim, dropout, factor,
+                    activation, use_rope, channel_attn_mode, channel_window,
+                    channel_summaries, local_time_rope,
+                ) for _ in range(e_layers)
+            ], d_model)
+        else:
+            self.encoder_x = self._build_encoder(
+                d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=False,
+                factor=factor, e_layers=e_layers, use_rope=use_rope
+            )
 
         # self.x_projector = CompressAndProject(self.series_dim, self.seq_len, d_model)
         # self.exog_projector = CompressAndProject(enc_in - series_dim, self.seq_len, d_model)
@@ -250,7 +276,18 @@ class TemporalCausalityEncoder(nn.Module):
         # attn_alpha = F.sigmoid(torch.einsum('bd,bd->b', x_history_projection, exog_history_projection)).view(-1, 1, 1, 1)
         # print("tc attn_alpha mean:", torch.mean(attn_alpha))
         # print(f"{patch_x.shape = }")
-        enc_x_out, _ = self.encoder_x(patch_x, self.c_in, exog_attns=None)
+        if self.architecture == "encoder_decoder":
+            patches = patch_x.reshape(B, self.c_in, patch_x.shape[-2], patch_x.shape[-1])
+            targets, covariates = patches[:, :X_D], patches[:, X_D:]
+            memory, _ = self.covariate_encoder(
+                covariates.reshape(B * EXOG_D, covariates.shape[-2], covariates.shape[-1]), EXOG_D,
+            )
+            memory = memory.reshape_as(covariates)
+            targets = self.target_decoder(targets, memory)
+            # Keep the existing prediction/auxiliary heads and output contract.
+            enc_x_out = torch.cat((targets, memory), dim=1)
+        else:
+            enc_x_out, _ = self.encoder_x(patch_x, self.c_in, exog_attns=None)
         # print(f"{enc_x_out.shape = }")
 
         # enc_exog_out = torch.reshape(

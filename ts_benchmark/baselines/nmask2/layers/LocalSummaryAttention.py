@@ -86,7 +86,17 @@ class LocalSummaryAttention(nn.Module):
         flat = tensor.permute(0, 1, 2, 4, 3).reshape(b * e * h, d, p)
         return F.adaptive_avg_pool1d(flat, count).reshape(b, e, h, d, count).transpose(-1, -2)
 
-    def forward(self, x):
+    def forward(self, x, memory=None):
+        if memory is not None:
+            # A separate Q stream and read-only K/V stream. Concatenation here
+            # only preserves channel positions for the legacy RoPE/embeddings;
+            # the result contains updates for targets alone.
+            if (x.ndim != 4 or memory.ndim != 4
+                    or x.shape[1] != self.target_channels
+                    or memory.shape[1] != self.n_channels - self.target_channels
+                    or x.shape[0] != memory.shape[0] or x.shape[2:] != memory.shape[2:]):
+                raise ValueError("Targets and covariate memory must have aligned batch/patch/features")
+            x = torch.cat((x, memory), dim=1)
         # x: [B, C, P, D], target channels first, then covariates.
         b, c, p, _ = x.shape
         if c != self.n_channels or p == 0:

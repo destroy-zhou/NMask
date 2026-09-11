@@ -26,6 +26,7 @@ class Nmask2Tests(unittest.TestCase):
                       dropout=0.0, alpha=0.0, use_future_exog=future)
         if not original:
             params["channel_attn_mode"] = mode
+            params["architecture"] = "joint"
         params.update(options)
         adapter = adapter_type(**params)
         adapter.config.enc_in = 5
@@ -33,7 +34,7 @@ class Nmask2Tests(unittest.TestCase):
         adapter.config.criterion = torch.nn.L1Loss()
         return (NmaskModel if original else Nmask2Model)(adapter.config)
 
-    def test_default_matches_original_with_and_without_future_covariates(self):
+    def test_legacy_joint_matches_original_with_and_without_future_covariates(self):
         for future in (False, True):
             with self.subTest(future=future):
                 torch.manual_seed(19)
@@ -139,6 +140,10 @@ class Nmask2Tests(unittest.TestCase):
             new_params = json.loads(after[after.index("--model-hyper-params") + 1])
             self.assertEqual(new_params.pop("channel_attn_mode"), "rope")
             self.assertTrue(new_params.pop("use_future_exog"))
+            for key, value in {"architecture": "encoder_decoder", "covariate_layers": 1,
+                               "channel_attn_type": "local_summary", "channel_window": 1,
+                               "channel_summaries": 4, "temporal_attn_scope": "target_only"}.items():
+                self.assertEqual(new_params.pop(key), value)
             self.assertEqual(new_params, old_params)
             self.assertEqual(after[after.index("--model-name") + 1], "nmask2.Nmask2")
 
@@ -285,7 +290,7 @@ class Nmask2Tests(unittest.TestCase):
         # Parameter layout is unchanged, allowing checkpoint reuse in either mode.
         baseline = self.make_model("embedding", channel_attn_type="local_summary")
         baseline.load_state_dict(model.state_dict())
-        self.assertEqual(Nmask2(seq_len=16).config.temporal_attn_scope, "all")
+        self.assertEqual(Nmask2(seq_len=16, architecture="joint").config.temporal_attn_scope, "all")
         with self.assertRaisesRegex(ValueError, "temporal_attn_scope"):
             Nmask2(seq_len=16, temporal_attn_scope="bad")
 
@@ -332,6 +337,121 @@ class Nmask2Tests(unittest.TestCase):
                 expected = torch.stack(logits, -1).softmax(-1)
                 torch.testing.assert_close(captured[0][:, 0, :, 0, 2], expected, rtol=1e-10, atol=1e-10)
                 self.assertTrue(torch.isfinite(module.key_projection.weight.grad).all())
+
+
+class Nmask2EncoderDecoderTests(unittest.TestCase):
+    make_model = Nmask2Tests.make_model
+
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def new_model(self, **options):
+        return self.make_model(architecture="encoder_decoder", **options)
+
+    def test_new_architecture_is_default_and_validates_options(self):
+        adapter = Nmask2(seq_len=16, horizon=8)
+        self.assertEqual(adapter.config.architecture, "encoder_decoder")
+        self.assertEqual(adapter.config.temporal_attn_scope, "target_only")
+        self.assertEqual(adapter.config.channel_attn_type, "local_summary")
+        self.assertEqual(adapter.config.channel_window, 1)
+        self.assertEqual(adapter.config.covariate_layers, 1)
+        for options in ({"architecture": "bad"}, {"covariate_layers": 0},
+                        {"covariate_layers": True}, {"covariate_layers": 1.5},
+                        {"channel_attn_type": "full"}, {"temporal_attn_scope": "all"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                Nmask2(seq_len=16, **options)
+
+    def test_read_only_memory_reused_and_no_target_to_covariate_path(self):
+        model = self.new_model(mode="embedding").eval()
+        core = model.temporal_encoder
+        self.assertFalse(hasattr(core, "encoder_x"))
+        encoded, inputs, handles = [], [], []
+        handles.append(core.covariate_encoder.register_forward_hook(
+            lambda module, args, result: encoded.append(result[0])))
+        for layer in core.target_decoder.layers:
+            handles.append(layer.register_forward_pre_hook(
+                lambda module, args: inputs.append((args[0].shape, args[1], args[1].detach().clone()))))
+        x, future = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        try:
+            prediction, _ = model(x, future, None)
+            self.assertEqual(len(encoded), 1)
+            self.assertEqual(len(inputs), 2)
+            for shape, memory, snapshot in inputs:
+                self.assertEqual(shape[:2], (2, 2))
+                self.assertEqual(memory.shape[:2], (2, 3))
+                self.assertEqual(memory.data_ptr(), encoded[0].data_ptr())
+                torch.testing.assert_close(memory, snapshot, rtol=0, atol=0)
+            encoded[0].retain_grad()
+            prediction.square().mean().backward()
+            self.assertGreater(encoded[0].grad.abs().sum().item(), 0)
+            changed = x.clone()
+            changed[:, :, :2] = torch.randn_like(changed[:, :, :2]) * 3
+            with torch.no_grad():
+                model(changed, future, None)
+            torch.testing.assert_close(encoded[0], encoded[1], rtol=0, atol=0)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    def test_gradients_all_modes_with_and_without_known_future(self):
+        for mode in ("rope", "none", "embedding"):
+            for future in (False, True):
+                with self.subTest(mode=mode, future=future):
+                    model = self.new_model(mode=mode, future=future, alpha=0.2,
+                                           covariate_layers=2, d_model=12, heads=4)
+                    x = torch.randn(2, 16, 5)
+                    exog = torch.randn(2, 8, 3, requires_grad=True)
+                    output, auxiliary = model(x, exog, None)
+                    self.assertEqual(output.shape, (2, 8, 2))
+                    self.assertTrue(torch.isfinite(output).all())
+                    (output.square().mean() + auxiliary).backward()
+                    core = model.temporal_encoder
+                    for layer in core.covariate_encoder.attn_layers:
+                        grad = layer.attention.value_projection.weight.grad
+                        self.assertTrue(torch.isfinite(grad).all())
+                        self.assertGreater(grad.abs().sum().item(), 0)
+                    for layer in core.target_decoder.layers:
+                        grad = layer.cross_attention.gate_query.weight.grad
+                        self.assertGreater(grad.abs().sum().item(), 0)
+                        if mode == "embedding":
+                            self.assertGreater(layer.cross_attention.channel_embedding.grad.abs().sum().item(), 0)
+                    if future:
+                        self.assertGreater(exog.grad.abs().sum().item(), 0)
+
+    def test_heads_short_horizons_and_window_boundaries(self):
+        for method in ("future_patch", "all_history", "all_future", "all_sequence"):
+            for window, summaries in ((1, 0), (5, 10)):
+                with self.subTest(method=method, window=window, summaries=summaries):
+                    model = self.new_model(predict_method=method, horizon=3,
+                                           channel_window=window, channel_summaries=summaries)
+                    result, _ = model(torch.randn(2, 16, 5), torch.randn(2, 3, 3), None)
+                    self.assertEqual(result.shape, (2, 3, 2))
+                    self.assertTrue(torch.isfinite(result).all())
+                    result.square().mean().backward()
+
+    def test_checkpoint_batch_independence_and_future_label_independence(self):
+        model = self.new_model(mode="embedding").eval()
+        restored = self.new_model(mode="embedding").eval()
+        checkpoint = io.BytesIO()
+        torch.save(model.state_dict(), checkpoint)
+        checkpoint.seek(0)
+        restored.load_state_dict(torch.load(checkpoint, weights_only=True))
+        x, exog = torch.randn(3, 16, 5), torch.randn(3, 8, 3)
+        with torch.no_grad():
+            expected, _ = model(x, exog, None)
+            actual, _ = restored(x, exog, torch.randn(3, 8, 2))
+            one, _ = restored(x[:1], exog[:1], None)
+        torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+        torch.testing.assert_close(actual[:1], one, rtol=1e-5, atol=1e-6)
+
+    def test_without_future_mode_does_not_read_future_inputs(self):
+        model = self.new_model(future=False).eval()
+        x = torch.randn(2, 16, 5)
+        with torch.no_grad():
+            absent, _ = model(x, None, None)
+            supplied, _ = model(x, torch.randn(2, 8, 3), None)
+        torch.testing.assert_close(absent, supplied, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

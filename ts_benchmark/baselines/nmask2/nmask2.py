@@ -38,18 +38,20 @@ MODEL_HYPER_PARAMS = {
 
     "infer_use_future": False,
     "channel_attn_mode": "rope",  # rope | none | embedding
-    "channel_attn_type": "full",  # full | local_summary
-    "channel_window": 5,
+    "architecture": "encoder_decoder",  # encoder_decoder | joint (legacy)
+    "covariate_layers": 1,
+    "channel_attn_type": "local_summary",  # full is supported by joint only
+    "channel_window": 1,
     "channel_summaries": 4,
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
-    "temporal_attn_scope": "all",  # all | target_only
+    "temporal_attn_scope": "target_only",  # all is supported by joint only
 
 }
 
 
 class Nmask2(DeepForecastingModelBase):
     """
-    Nmask2 adapter with configurable channel positional information.
+    Nmask2 adapter with independent covariate encoding and target decoding.
 
     Attributes:
         model_name (str): Name of the model for identification purposes.
@@ -60,7 +62,20 @@ class Nmask2(DeepForecastingModelBase):
     """
 
     def __init__(self, **kwargs):
+        if kwargs.get("architecture") == "joint":
+            # Reproduce the old defaults when explicitly selecting the baseline.
+            kwargs.setdefault("channel_attn_type", "full")
+            kwargs.setdefault("channel_window", 5)
+            kwargs.setdefault("temporal_attn_scope", "all")
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+        if self.config.architecture not in ("encoder_decoder", "joint"):
+            raise ValueError("architecture must be encoder_decoder or joint")
+        if self.config.architecture == "encoder_decoder":
+            if self.config.channel_attn_type != "local_summary" or self.config.temporal_attn_scope != "target_only":
+                raise ValueError("encoder_decoder requires channel_attn_type=local_summary and temporal_attn_scope=target_only; use architecture=joint for the old model")
+            depth = self.config.covariate_layers
+            if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+                raise ValueError("covariate_layers must be a positive integer")
         if self.config.temporal_attn_scope not in ("all", "target_only"):
             raise ValueError("temporal_attn_scope must be all or target_only")
         validate_channel_attention(self.config.channel_attn_type,
