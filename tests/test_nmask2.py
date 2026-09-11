@@ -454,5 +454,79 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         torch.testing.assert_close(absent, supplied, rtol=0, atol=0)
 
 
+class Nmask2FusionTests(unittest.TestCase):
+    make_model = Nmask2Tests.make_model
+
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_qk_identity_preserves_dot_with_all_identity_modes(self):
+        for mode in ("none", "rope", "embedding"):
+            dot = LocalSummaryAttention(8, 2, 4, 2, mode=mode).double()
+            qk = LocalSummaryAttention(8, 2, 4, 2, mode=mode, channel_fusion_mode="qk").double()
+            missing = qk.load_state_dict(dot.state_dict(), strict=False)
+            self.assertEqual(missing.missing_keys, ["gate_key.weight"])
+            self.assertEqual(missing.unexpected_keys, [])
+            with torch.no_grad():
+                qk.gate_key.weight.copy_(torch.eye(8, dtype=torch.float64))
+            x = torch.randn(2, 4, 5, 8, dtype=torch.float64)
+            torch.testing.assert_close(dot(x), qk(x), rtol=1e-12, atol=1e-12)
+
+    def test_fusion_scores_match_reference_and_values_are_unprojected(self):
+        # W=1/R=0 makes each per-variable context exactly its V projection,
+        # so we can check the full fusion independently of local attention.
+        for mode in ("qk", "mlp"):
+            module = LocalSummaryAttention(8, 2, 5, 2, window=1, summaries=0,
+                                           mode="none", channel_fusion_mode=mode).double()
+            x = torch.randn(2, 5, 3, 8, dtype=torch.float64)
+            contexts = module.value_projection(x[:, 2:]).permute(0, 2, 1, 3)
+            contexts = contexts[:, None].expand(2, 2, 3, 3, 8)
+            query = module.gate_query(x[:, :2]).unsqueeze(-2).expand_as(contexts)
+            if mode == "qk":
+                keys = torch.nn.functional.linear(contexts, module.gate_key.weight)
+                scores = (query * keys).sum(-1) / (8 ** 0.5)
+            else:
+                first, _, last = module.gate_mlp
+                hidden = torch.nn.functional.gelu(torch.nn.functional.linear(
+                    torch.cat((query, contexts), dim=-1), first.weight, first.bias))
+                scores = torch.nn.functional.linear(hidden, last.weight).squeeze(-1)
+            expected = module.out_projection((scores.softmax(-1).unsqueeze(-1) * contexts).sum(-2))
+            actual = module(x)
+            torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+            permuted = x[:, [0, 1, 4, 2, 3]]
+            torch.testing.assert_close(module(permuted), actual, rtol=1e-12, atol=1e-12)
+
+    def test_new_modes_model_gradients_checkpoint_and_validation(self):
+        for architecture in ("encoder_decoder", "joint"):
+            for fusion in ("qk", "mlp"):
+                model = self.make_model(mode="embedding", architecture=architecture,
+                                        channel_attn_type="local_summary", channel_fusion_mode=fusion)
+                x, future = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                result, _ = model(x, future, None)
+                result.square().mean().backward()
+                modules = [module for module in model.modules() if isinstance(module, LocalSummaryAttention)]
+                for module in modules:
+                    self.assertEqual(module.channel_fusion_mode, fusion)
+                    scorer = module.gate_key if fusion == "qk" else module.gate_mlp
+                    for param in scorer.parameters():
+                        self.assertIsNotNone(param.grad)
+                        self.assertTrue(torch.isfinite(param.grad).all())
+                        self.assertGreater(param.grad.abs().sum().item(), 0)
+                    self.assertGreater(module.gate_query.weight.grad.abs().sum().item(), 0)
+                restored = self.make_model(mode="embedding", architecture=architecture,
+                                           channel_attn_type="local_summary", channel_fusion_mode=fusion)
+                restored.load_state_dict(model.state_dict())
+                model.eval()
+                restored.eval()
+                with torch.no_grad():
+                    torch.testing.assert_close(model(x, future, None)[0], restored(x, future, None)[0], rtol=0, atol=0)
+        self.assertEqual(Nmask2(seq_len=16).config.channel_fusion_mode, "dot")
+        with self.assertRaisesRegex(ValueError, "channel_fusion_mode"):
+            Nmask2(seq_len=16, channel_fusion_mode="invalid")
+        with self.assertRaisesRegex(ValueError, "local_summary"):
+            Nmask2(seq_len=16, architecture="joint", channel_fusion_mode="mlp")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,7 @@ def build_covariate_encoder(d_model, d_ff, n_heads, layers, dropout,
 class TargetDecoderLayer(nn.Module):
     def __init__(self, d_model, d_ff, n_heads, n_channels, target_channels,
                  dropout, factor, activation, use_rope, channel_attn_mode,
-                 channel_window, channel_summaries, local_time_rope):
+                 channel_window, channel_summaries, local_time_rope, channel_fusion_mode="dot"):
         super().__init__()
         self.time_attention = time_attention(d_model, n_heads, dropout, factor, use_rope)
         head_dim = d_model // n_heads
@@ -39,6 +39,7 @@ class TargetDecoderLayer(nn.Module):
             window=channel_window, summaries=channel_summaries,
             mode=channel_attn_mode, dropout=dropout, head_dim=head_dim,
             local_time_rope=local_time_rope,
+            channel_fusion_mode=channel_fusion_mode,
         )
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

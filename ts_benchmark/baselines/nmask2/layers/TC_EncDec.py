@@ -6,7 +6,7 @@ import numpy as np
 from ts_benchmark.baselines.nmask2.layers.Embed import PatchEmbedding, CompressAndProject, PositionalEmbedding
 from ts_benchmark.baselines.nmask2.layers.SelfAttention_Family import FullAttention, AttentionLayer
 from ts_benchmark.baselines.nmask2.layers.Transformer_EncDec import Encoder, EncoderLayer
-from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import LocalSummaryAttention, validate_channel_attention
+from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import LocalSummaryAttention, validate_channel_attention, validate_channel_fusion
 from ts_benchmark.baselines.nmask2.layers.CovariateDecoder import (
     build_covariate_encoder, TargetDecoder, TargetDecoderLayer,
 )
@@ -46,7 +46,7 @@ class TemporalCausalityEncoder(nn.Module):
                  channel_attn_mode="rope", channel_attn_type="local_summary",
                  channel_window=1, channel_summaries=4, local_time_rope=True,
                  temporal_attn_scope="target_only", architecture="encoder_decoder",
-                 covariate_layers=1
+                 covariate_layers=1, channel_fusion_mode="dot"
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -75,6 +75,10 @@ class TemporalCausalityEncoder(nn.Module):
         self.channel_attn_type = channel_attn_type
         self.channel_window, self.channel_summaries = channel_window, channel_summaries
         self.local_time_rope = local_time_rope
+        validate_channel_fusion(channel_fusion_mode)
+        if channel_attn_type != "local_summary" and channel_fusion_mode != "dot":
+            raise ValueError("channel_fusion_mode qk/mlp requires channel_attn_type=local_summary")
+        self.channel_fusion_mode = channel_fusion_mode
         self.temporal_attn_scope = temporal_attn_scope
         stride = patch_len
         padding = stride
@@ -105,7 +109,7 @@ class TemporalCausalityEncoder(nn.Module):
                 TargetDecoderLayer(
                     d_model, d_ff, n_heads, enc_in, series_dim, dropout, factor,
                     activation, use_rope, channel_attn_mode, channel_window,
-                    channel_summaries, local_time_rope,
+                    channel_summaries, local_time_rope, channel_fusion_mode,
                 ) for _ in range(e_layers)
             ], d_model)
         else:
@@ -393,6 +397,7 @@ class TemporalCausalityEncoder(nn.Module):
                         window=self.channel_window, summaries=self.channel_summaries,
                         mode=self.channel_attn_mode, dropout=dropout, head_dim=channel_head_dim,
                         local_time_rope=self.local_time_rope,
+                        channel_fusion_mode=self.channel_fusion_mode,
                     ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)

@@ -70,6 +70,35 @@ supervise that auxiliary head during training, but are never forward inputs.
 
 ## Running
 
+### Variable fusion modes
+
+`channel_fusion_mode` selects the second-stage softmax over covariates after
+each variable's local/summary attention. It works in both architectures when
+`channel_attn_type=local_summary` and is independent of RoPE and variable identity.
+
+| Mode | Score for target query q and per-variable representation z |
+| --- | --- |
+| `dot` (default) | `q = gate_query(target); score = dot(q, z) / sqrt(width)` |
+| `qk` | `score = dot(q, gate_key(z)) / sqrt(width)` |
+| `mlp` | `score = Linear(GELU(Linear(concat(q, z))))` |
+
+When variable embeddings are enabled, their existing contribution is added to
+z before scoring (including before the new key projection). Values are always
+the original per-variable context: neither the key projection nor the scorer
+changes the values being fused. All modes softmax over variables only.
+
+The MLP is shared across variables, target channels and patches within each
+layer. Its hidden size is `min(64, n_heads * head_dim)` and its output is one
+scalar per variable. Different decoder layers have independent scorers.
+QK mode adds a bias-free `width -> width` key projection. No extra V projection
+is added. Default dot mode preserves the existing parameter layout and behavior.
+Train the new modes separately; their additional parameters require matching
+checkpoint configurations.
+
+For example, add `"channel_fusion_mode": "qk"` or
+`"channel_fusion_mode": "mlp"` to `--model-hyper-params` and use a separate
+`--save-path` for each experiment. Existing scripts continue to default to dot.
+
 Run from the repository root in the environment used for nmask:
 
 ```bash

@@ -18,10 +18,15 @@ def validate_channel_attention(attention_type, window, summaries):
         raise ValueError("channel_summaries must be a nonnegative integer")
 
 
+def validate_channel_fusion(mode):
+    if mode not in ("dot", "qk", "mlp"):
+        raise ValueError("channel_fusion_mode must be dot, qk or mlp")
+
+
 class LocalSummaryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_channels, target_channels,
                  window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None,
-                 local_time_rope=True):
+                 local_time_rope=True, channel_fusion_mode="dot"):
         super().__init__()
         validate_channel_attention("local_summary", window, summaries)
         if mode not in ("rope", "none", "embedding"):
@@ -44,6 +49,14 @@ class LocalSummaryAttention(nn.Module):
         self.value_projection = nn.Linear(d_model, width)
         self.out_projection = nn.Linear(width, d_model)
         self.gate_query = nn.Linear(d_model, width)
+        validate_channel_fusion(channel_fusion_mode)
+        self.channel_fusion_mode = channel_fusion_mode
+        # Only optional modes add parameters, preserving existing dot checkpoints.
+        self.gate_key = nn.Linear(width, width, bias=False) if channel_fusion_mode == "qk" else None
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(2 * width, min(64, width)), nn.GELU(),
+            nn.Linear(min(64, width), 1, bias=False),
+        ) if channel_fusion_mode == "mlp" else None
         self.dropout = nn.Dropout(dropout)
         self.rope = RotaryEmbedding(self.head_dim) if mode == "rope" else None
         self.channel_embedding = None
@@ -135,6 +148,14 @@ class LocalSummaryAttention(nn.Module):
             # Without time RoPE, a constant K offset cancels within a variable.
             identities = F.linear(self.channel_embedding[:, s:, 0], self.key_projection.weight)
             gate_keys = context + identities[:, None, None]
-        gate = torch.softmax((gate_query * gate_keys).sum(-1) / math.sqrt(h * d), dim=-1)
+        if self.channel_fusion_mode == "qk":
+            gate_keys = self.gate_key(gate_keys)
+        if self.channel_fusion_mode == "mlp":
+            # One scorer shared over covariates, target channels and patches.
+            gate_input = torch.cat((gate_query.expand_as(gate_keys), gate_keys), dim=-1)
+            gate_scores = self.gate_mlp(gate_input).squeeze(-1)
+        else:
+            gate_scores = (gate_query * gate_keys).sum(-1) / math.sqrt(h * d)
+        gate = torch.softmax(gate_scores, dim=-1)
         fused = (gate.unsqueeze(-1) * context).sum(-2)
         return self.out_projection(fused)
