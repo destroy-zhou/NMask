@@ -42,6 +42,7 @@ MODEL_HYPER_PARAMS = {
     "channel_window": 5,
     "channel_summaries": 4,
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
+    "temporal_attn_scope": "all",  # all | target_only
 
 }
 
@@ -60,6 +61,8 @@ class Nmask2(DeepForecastingModelBase):
 
     def __init__(self, **kwargs):
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+        if self.config.temporal_attn_scope not in ("all", "target_only"):
+            raise ValueError("temporal_attn_scope must be all or target_only")
         validate_channel_attention(self.config.channel_attn_type,
                                    self.config.channel_window, self.config.channel_summaries)
         if self.config.channel_attn_mode not in ("rope", "none", "embedding"):

@@ -45,6 +45,7 @@ class Nmask2Model(nn.Module):
             channel_window=config.channel_window,
             channel_summaries=config.channel_summaries,
             local_time_rope=config.local_time_rope,
+            temporal_attn_scope=config.temporal_attn_scope,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

@@ -238,6 +238,57 @@ class Nmask2Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "covariate"):
             LocalSummaryAttention(8, 2, 1, 1)
 
+    def test_target_only_temporal_attention_routing_and_gradients(self):
+        for kind in ("full", "local_summary"):
+            for mode in ("rope", "none", "embedding"):
+                for future in (False, True):
+                    with self.subTest(kind=kind, mode=mode, future=future):
+                        model = self.make_model(mode, future, channel_attn_type=kind,
+                                                temporal_attn_scope="target_only")
+                        handles, captured = [], []
+                        for layer in model.temporal_encoder.encoder_x.attn_layers:
+                            handles.append(layer.attention.register_forward_pre_hook(
+                                lambda m, args: captured.append(args[0].shape)))
+                        try:
+                            output, auxiliary = model(torch.randn(3, 16, 5), torch.randn(3, 8, 3), None)
+                            self.assertEqual(output.shape, (3, 8, 2))
+                            (output.square().mean() + auxiliary).backward()
+                        finally:
+                            for handle in handles:
+                                handle.remove()
+                        self.assertEqual(len(captured), 2)
+                        self.assertTrue(all(shape[0] == 3 * 2 for shape in captured))
+                        self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()
+                                            if p.grad is not None))
+                        for layer in model.temporal_encoder.encoder_x.attn_layers:
+                            self.assertGreater(layer.attention.query_projection.weight.grad.abs().sum().item(), 0)
+
+    def test_target_only_covariates_skip_temporal_mixing(self):
+        model = self.make_model("embedding", channel_attn_type="local_summary",
+                                temporal_attn_scope="target_only").eval()
+        layer = model.temporal_encoder.encoder_x.attn_layers[0]
+        x = torch.randn(2, 5, 7, 16)
+        captured = []
+        handle = layer.local_channel_attention.register_forward_pre_hook(
+            lambda m, args: captured.append(args[0].detach().clone()))
+        with torch.no_grad():
+            original, _ = layer(x.reshape(-1, 7, 16), 5)
+            changed = x.clone()
+            changed[:, 2:, -1] += torch.randn_like(changed[:, 2:, -1]) * 10
+            perturbed, _ = layer(changed.reshape(-1, 7, 16), 5)
+        handle.remove()
+        # Covariates only pass token-wise normalization before channel attention.
+        torch.testing.assert_close(captured[0][:, 2:], layer.norm1(x[:, 2:]))
+        # Their later FFNs/norms cannot spread a perturbation to other patches.
+        torch.testing.assert_close(original.reshape(2, 5, 7, 16)[:, 2:, :-1],
+                                   perturbed.reshape(2, 5, 7, 16)[:, 2:, :-1], rtol=0, atol=0)
+        # Parameter layout is unchanged, allowing checkpoint reuse in either mode.
+        baseline = self.make_model("embedding", channel_attn_type="local_summary")
+        baseline.load_state_dict(model.state_dict())
+        self.assertEqual(Nmask2(seq_len=16).config.temporal_attn_scope, "all")
+        with self.assertRaisesRegex(ValueError, "temporal_attn_scope"):
+            Nmask2(seq_len=16, temporal_attn_scope="bad")
+
     def test_local_time_rope_relative_positions_and_odd_tail(self):
         module = LocalSummaryAttention(10, 2, 3, 1, mode="none")
         x = torch.randn(2, 3, 2, 7, 5, dtype=torch.float64)

@@ -93,6 +93,21 @@ to reproduce the previous local-summary behavior with existing checkpoints.
 Existing local-summary scripts enable this through the default; use a separate
 save path when comparing runs with time RoPE enabled versus disabled.
 
+Set `temporal_attn_scope="target_only"` to run temporal self-attention only
+on endogenous channels (all their historical and future patches). The default
+`"all"` preserves the previous behavior. Covariates bypass temporal Q/K/V
+projection, attention and its residual update; they still receive token-wise
+LayerNorm and FFN processing. Channel attention, `channel_attn_mode`, and
+`local_time_rope` are independent of this setting. With `local_summary`, the
+covariates therefore preserve patch-local content until targets retrieve their
+local tokens and pooled summaries. With `full`, channel attention still updates
+all channels and can indirectly transfer temporally mixed target information.
+The option introduces no new parameters and supports existing checkpoints.
+
+For the target-only experiment, add `"temporal_attn_scope": "target_only"`
+to the model hyperparameters and use a separate result directory, for example
+`<dataset>/nmask2/local_summary_embedding_w5_r4_target_only/search`.
+
 For S targets, E covariates and P total patches, attention score computation is
 O(B S E P (W+R) D), without constructing a P-by-P cross-attention matrix.
 This is cheaper than full cross-time target-to-covariate attention when W+R is
