@@ -41,6 +41,7 @@ MODEL_HYPER_PARAMS = {
     "channel_attn_type": "full",  # full | local_summary
     "channel_window": 5,
     "channel_summaries": 4,
+    "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
 
 }
 

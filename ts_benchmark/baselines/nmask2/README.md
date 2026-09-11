@@ -51,6 +51,7 @@ Set these model hyperparameters to replace each layer's channel attention:
   "channel_attn_type": "local_summary",
   "channel_window": 5,
   "channel_summaries": 4,
+  "local_time_rope": true,
   "channel_attn_mode": "embedding"
 }
 ```
@@ -76,8 +77,21 @@ learned future covariate placeholders are used instead of known future values.
 The existing `channel_attn_mode` still applies: `rope` rotates Q/K along the
 channel axis before local gathering/pooling, `none` adds no variable identity,
 and `embedding` adds identity to Q/K and the variable-selection gate, never V.
-Identity is included in the gate because a constant variable-specific K offset
-alone cancels in a softmax restricted to that variable. Temporal RoPE is unchanged.
+Identity is also included in the variable-selection gate. The existing temporal
+self-attention RoPE is unchanged.
+
+`local_time_rope=true` (default) independently applies time RoPE to local Q/K
+using their original indices in the concatenated history/future patch sequence,
+before gathering windows. It is active for all three `channel_attn_mode` values;
+`rope` combines channel rotation with time rotation, while `embedding` combines
+variable identities with time rotation. V, summary Q/K and the fusion gate do
+not receive this additional time rotation. Summary keys remain pooled from
+keys before time rotation because summaries cover intervals, not single patches.
+For odd head dimensions, the last component is left unrotated. No new trainable
+parameters or checkpoint tensors are introduced. Set `local_time_rope=false`
+to reproduce the previous local-summary behavior with existing checkpoints.
+Existing local-summary scripts enable this through the default; use a separate
+save path when comparing runs with time RoPE enabled versus disabled.
 
 For S targets, E covariates and P total patches, attention score computation is
 O(B S E P (W+R) D), without constructing a P-by-P cross-attention matrix.

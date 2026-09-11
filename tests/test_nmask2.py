@@ -166,7 +166,8 @@ class Nmask2Tests(unittest.TestCase):
         # boundary masking, summary count clamping and both normalization stages.
         for mode, window, summaries in (("none", 5, 2), ("embedding", 1, 0), ("rope", 5, 8)):
             with self.subTest(mode=mode, window=window, summaries=summaries):
-                module = LocalSummaryAttention(8, 2, 4, 2, window, summaries, mode).double()
+                module = LocalSummaryAttention(8, 2, 4, 2, window, summaries, mode,
+                                               local_time_rope=False).double()
                 x = torch.randn(2, 4, 3, 8, dtype=torch.float64)
                 qk = x if module.channel_embedding is None else x + module.channel_embedding
                 q = module.query_projection(qk).reshape(2, 4, 3, 2, 4)
@@ -236,6 +237,50 @@ class Nmask2Tests(unittest.TestCase):
                 Nmask2(seq_len=16, **options)
         with self.assertRaisesRegex(ValueError, "covariate"):
             LocalSummaryAttention(8, 2, 1, 1)
+
+    def test_local_time_rope_relative_positions_and_odd_tail(self):
+        module = LocalSummaryAttention(10, 2, 3, 1, mode="none")
+        x = torch.randn(2, 3, 2, 7, 5, dtype=torch.float64)
+        rotated = module._rotate_time(x)
+        torch.testing.assert_close(rotated.square().sum(-1), x.square().sum(-1))
+        torch.testing.assert_close(rotated[..., -1], x[..., -1], rtol=0, atol=0)
+        # A common shift of Q/K positions must preserve their dot product.
+        padded = torch.cat((torch.zeros_like(x[..., :2, :]), x), dim=-2)
+        shifted = module._rotate_time(padded)[..., 2:, :]
+        torch.testing.assert_close(
+            (rotated[..., 1, :] * rotated[..., 4, :]).sum(-1),
+            (shifted[..., 1, :] * shifted[..., 4, :]).sum(-1), rtol=1e-12, atol=1e-12)
+
+    def test_local_time_rope_scores_independent_of_channel_mode(self):
+        for mode in ("none", "embedding", "rope"):
+            with self.subTest(mode=mode):
+                model = self.make_model(mode, channel_attn_type="local_summary", local_time_rope=False)
+                self.assertFalse(model.temporal_encoder.encoder_x.attn_layers[0].local_channel_attention.local_time_rope)
+                module = LocalSummaryAttention(8, 2, 3, 1, window=3, summaries=1, mode=mode).double()
+                x = torch.randn(2, 3, 5, 8, dtype=torch.float64)
+                qk = x if module.channel_embedding is None else x + module.channel_embedding
+                q = module.query_projection(qk).reshape(2, 3, 5, 2, 4)
+                k = module.key_projection(qk).reshape(2, 3, 5, 2, 4)
+                if module.rope is not None:
+                    q, k = module._rotate_channels(q), module._rotate_channels(k)
+                captured = []
+                handle = module.dropout.register_forward_pre_hook(lambda m, args: captured.append(args[0]))
+                module(x).square().mean().backward()
+                handle.remove()
+                # Query p=2: check three local keys and the unchanged summary.
+                query = q[:, 0, 2]
+                logits = []
+                for pos in (1, 2, 3):
+                    key = k[:, 1, pos]
+                    angle = torch.tensor([pos - 2, (pos - 2) / 100], dtype=torch.float64)
+                    pairs = key.reshape(2, 2, 2, 2)
+                    turned = torch.stack((pairs[..., 0] * angle.cos() - pairs[..., 1] * angle.sin(),
+                                          pairs[..., 0] * angle.sin() + pairs[..., 1] * angle.cos()), -1).flatten(-2)
+                    logits.append((query * turned).sum(-1) / 2)
+                logits.append((query * k[:, 1].mean(1)).sum(-1) / 2)
+                expected = torch.stack(logits, -1).softmax(-1)
+                torch.testing.assert_close(captured[0][:, 0, :, 0, 2], expected, rtol=1e-10, atol=1e-10)
+                self.assertTrue(torch.isfinite(module.key_projection.weight.grad).all())
 
 
 if __name__ == "__main__":

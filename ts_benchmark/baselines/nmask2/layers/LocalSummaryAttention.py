@@ -20,7 +20,8 @@ def validate_channel_attention(attention_type, window, summaries):
 
 class LocalSummaryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_channels, target_channels,
-                 window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None):
+                 window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None,
+                 local_time_rope=True):
         super().__init__()
         validate_channel_attention("local_summary", window, summaries)
         if mode not in ("rope", "none", "embedding"):
@@ -34,6 +35,9 @@ class LocalSummaryAttention(nn.Module):
         if mode == "rope" and self.head_dim % 2:
             self.head_dim += 1
         self.mode = mode
+        if not isinstance(local_time_rope, bool):
+            raise ValueError("local_time_rope must be a boolean")
+        self.local_time_rope = local_time_rope
         width = n_heads * self.head_dim
         self.query_projection = nn.Linear(d_model, width)
         self.key_projection = nn.Linear(d_model, width)
@@ -53,6 +57,21 @@ class LocalSummaryAttention(nn.Module):
         tensor = tensor.permute(0, 2, 3, 1, 4).reshape(b * p * h, c, d)
         tensor = self.rope(tensor)
         return tensor.reshape(b, p, h, c, d).permute(0, 3, 1, 2, 4)
+
+    def _rotate_time(self, tensor):
+        # [B, C, H, P, d]: use original patch positions before window gathering.
+        # Rotate adjacent pairs with equal frequencies; keep an odd tail intact.
+        rotary_dim = tensor.shape[-1] // 2 * 2
+        if rotary_dim == 0:
+            return tensor
+        dtype = torch.float64 if tensor.dtype == torch.float64 else torch.float32
+        positions = torch.arange(tensor.shape[-2], device=tensor.device, dtype=dtype)
+        freq = 10000 ** (-torch.arange(0, rotary_dim, 2, device=tensor.device, dtype=dtype) / rotary_dim)
+        angles = positions[:, None] * freq[None, :]
+        cos, sin = angles.cos().to(tensor.dtype), angles.sin().to(tensor.dtype)
+        even, odd = tensor[..., :rotary_dim:2], tensor[..., 1:rotary_dim:2]
+        rotated = torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
+        return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
     def _local_indices(self, length, device):
         offsets = torch.arange(-(self.window // 2), self.window // 2 + 1, device=device)
@@ -83,8 +102,10 @@ class LocalSummaryAttention(nn.Module):
         k, v = (t[:, s:].permute(0, 1, 3, 2, 4) for t in (k, v))
 
         indices, valid = self._local_indices(p, x.device)
-        local_k, local_v = k[:, :, :, indices, :], v[:, :, :, indices, :]
-        scores = torch.einsum("bshpd,behpwd->bshepw", q, local_k) / math.sqrt(d)
+        local_q = self._rotate_time(q) if self.local_time_rope else q
+        local_keys = self._rotate_time(k) if self.local_time_rope else k
+        local_k, local_v = local_keys[:, :, :, indices, :], v[:, :, :, indices, :]
+        scores = torch.einsum("bshpd,behpwd->bshepw", local_q, local_k) / math.sqrt(d)
         scores = scores.masked_fill(~valid, float("-inf"))
         count = min(self.summaries, p)
         if count:
@@ -100,9 +121,8 @@ class LocalSummaryAttention(nn.Module):
         gate_query = self.gate_query(qk[:, :s]).unsqueeze(-2)
         gate_keys = context
         if self.channel_embedding is not None:
-            # A constant per-variable K offset cancels in the within-variable
-            # softmax. Include identity in variable selection as well, without
-            # adding it to the values being fused.
+            # Include variable identity in selection without changing values.
+            # Without time RoPE, a constant K offset cancels within a variable.
             identities = F.linear(self.channel_embedding[:, s:, 0], self.key_projection.weight)
             gate_keys = context + identities[:, None, None]
         gate = torch.softmax((gate_query * gate_keys).sum(-1) / math.sqrt(h * d), dim=-1)

@@ -41,7 +41,7 @@ class TemporalCausalityEncoder(nn.Module):
                  patch_len, stride, d_model, d_ff, n_heads, e_layers,
                  dropout, factor, activation, pad_method, predict_method, use_future_exog, use_rope=True,
                  channel_attn_mode="rope", channel_attn_type="full",
-                 channel_window=5, channel_summaries=4
+                 channel_window=5, channel_summaries=4, local_time_rope=True
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -59,6 +59,7 @@ class TemporalCausalityEncoder(nn.Module):
         validate_channel_attention(channel_attn_type, channel_window, channel_summaries)
         self.channel_attn_type = channel_attn_type
         self.channel_window, self.channel_summaries = channel_window, channel_summaries
+        self.local_time_rope = local_time_rope
         stride = patch_len
         padding = stride
         future_patch_num = int((pred_len - patch_len) / stride + 2)
@@ -350,6 +351,7 @@ class TemporalCausalityEncoder(nn.Module):
                         d_model, n_heads, self.c_in, self.series_dim,
                         window=self.channel_window, summaries=self.channel_summaries,
                         mode=self.channel_attn_mode, dropout=dropout, head_dim=channel_head_dim,
+                        local_time_rope=self.local_time_rope,
                     ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)
