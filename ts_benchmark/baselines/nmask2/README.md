@@ -99,6 +99,15 @@ the temporal encoder can still mix calendar information across patches when
 `calendar_temporal_attn=true`. When it is false, each calendar memory patch
 remains position-local.
 
+Set `covariate_calendar_attn=true` to let every ordinary covariate query the
+calendar channels before the resulting covariate memory is exposed to the
+target decoder. Each covariate layer follows the target layer order: temporal
+self-attention, local-summary calendar attention, then its FFN. Calendar keys
+remain read-only and restricted to W=1/R=0; ordinary covariates are updated,
+while calendar channels are not. `covariate_layers` controls this decoder
+depth. This option defaults to false, requires `use_calendar_exog=true`, at
+least one ordinary covariate, and `architecture=encoder_decoder`.
+
 Calendar timestamps remain known when `use_future_exog=false`; they are not
 replaced by future placeholders or included in auxiliary covariate prediction
 loss. Calendar-only conditioning is supported. Both encoder_decoder and joint
