@@ -47,6 +47,7 @@ MODEL_HYPER_PARAMS = {
     "channel_window": 1,
     "channel_summaries": 4,
     "use_calendar_exog": False,  # append time marks as known future covariates
+    "calendar_temporal_attn": True,  # False keeps calendar patches position-local
     "channel_fusion_mode": "dot",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
@@ -75,8 +76,13 @@ class Nmask2(DeepForecastingModelBase):
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
         if not isinstance(self.config.use_calendar_exog, bool):
             raise ValueError("use_calendar_exog must be a boolean")
+        if not isinstance(self.config.calendar_temporal_attn, bool):
+            raise ValueError("calendar_temporal_attn must be a boolean")
         if self.config.use_calendar_exog and self.config.channel_attn_type != "local_summary":
             raise ValueError("use_calendar_exog requires channel_attn_type=local_summary")
+        if (self.config.use_calendar_exog and not self.config.calendar_temporal_attn
+                and self.config.architecture != "encoder_decoder"):
+            raise ValueError("calendar_temporal_attn=false requires architecture=encoder_decoder")
         validate_channel_fusion(self.config.channel_fusion_mode)
         if self.config.channel_attn_type != "local_summary" and self.config.channel_fusion_mode != "dot":
             raise ValueError("channel_fusion_mode qk/mlp/cross_attn requires channel_attn_type=local_summary")

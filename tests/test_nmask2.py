@@ -356,6 +356,7 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         self.assertEqual(adapter.config.channel_attn_type, "local_summary")
         self.assertEqual(adapter.config.channel_window, 1)
         self.assertEqual(adapter.config.covariate_layers, 1)
+        self.assertTrue(adapter.config.calendar_temporal_attn)
         for options in ({"architecture": "bad"}, {"covariate_layers": 0},
                         {"covariate_layers": True}, {"covariate_layers": 1.5},
                         {"channel_attn_type": "full"}, {"temporal_attn_scope": "all"}):
@@ -661,23 +662,91 @@ class Nmask2CalendarTests(unittest.TestCase):
             model(x, exog, None)
         with self.assertRaisesRegex(ValueError, "boolean"):
             Nmask2(seq_len=16, use_calendar_exog=1)
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            Nmask2(seq_len=16, calendar_temporal_attn=0)
         with self.assertRaisesRegex(ValueError, "local_summary"):
             Nmask2(seq_len=16, architecture="joint", use_calendar_exog=True)
+        with self.assertRaisesRegex(ValueError, "encoder_decoder"):
+            Nmask2(seq_len=16, architecture="joint", channel_attn_type="local_summary",
+                   use_calendar_exog=True, calendar_temporal_attn=False)
+
+    def test_calendar_temporal_attention_can_be_bypassed_independently(self):
+        x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        past, future = torch.randn(2, 16, 4), torch.randn(2, 8, 4)
+        encoder_inputs, decoder_memories = {}, {}
+
+        for enabled in (True, False):
+            model = self.make_model(
+                architecture="encoder_decoder", use_calendar_exog=True, freq="h",
+                calendar_temporal_attn=enabled,
+            ).eval()
+            core = model.temporal_encoder
+            handles = [
+                core.covariate_encoder.register_forward_pre_hook(
+                    lambda module, args, flag=enabled:
+                        encoder_inputs.__setitem__(flag, args[0].detach().clone())),
+                core.target_decoder.register_forward_pre_hook(
+                    lambda module, args, flag=enabled:
+                        decoder_memories.__setitem__(flag, args[1].detach().clone())),
+            ]
+            try:
+                with torch.no_grad():
+                    output, _ = model(x, exog, None, past, future)
+                self.assertEqual(output.shape, (2, 8, 2))
+            finally:
+                for handle in handles:
+                    handle.remove()
+
+        # Enabled: all 3 ordinary + 4 calendar channels enter the encoder.
+        self.assertEqual(encoder_inputs[True].shape[0], 2 * 7)
+        # Disabled: only the 3 ordinary covariates enter it.
+        self.assertEqual(encoder_inputs[False].shape[0], 2 * 3)
+
+        bypassed_calendar = decoder_memories[False][:, -4:]
+        disabled_model = self.make_model(
+            architecture="encoder_decoder", use_calendar_exog=True, freq="h",
+            calendar_temporal_attn=False,
+        ).eval()
+        disabled_model.load_state_dict(model.state_dict())
+        with torch.no_grad():
+            hist, _ = disabled_model.temporal_encoder.x_patch_embedding(past.transpose(1, 2))
+            fut, _ = disabled_model.temporal_encoder.x_patch_embedding(future.transpose(1, 2))
+        expected = torch.cat((hist, fut), dim=1).reshape_as(bypassed_calendar)
+        torch.testing.assert_close(bypassed_calendar, expected, rtol=0, atol=0)
+
+        train_model = self.make_model(
+            architecture="encoder_decoder", use_calendar_exog=True, freq="h",
+            calendar_temporal_attn=False,
+        ).train()
+        train_past, train_future = past.clone().requires_grad_(), future.clone().requires_grad_()
+        prediction, _ = train_model(x, exog, None, train_past, train_future)
+        prediction.square().mean().backward()
+        self.assertGreater(train_past.grad.abs().sum().item(), 0)
+        self.assertGreater(train_future.grad.abs().sum().item(), 0)
+        encoder_grad = train_model.temporal_encoder.covariate_encoder.attn_layers[0].attention
+        self.assertGreater(encoder_grad.value_projection.weight.grad.abs().sum().item(), 0)
 
     def test_calendar_only_without_regular_covariates(self):
         for known_future in (True, False):
-            adapter = Nmask2(seq_len=16, horizon=3, patch_len=4, stride=4,
-                             d_model=8, d_ff=16, n_heads=2, e_layers=1, dropout=0.0,
-                             use_calendar_exog=True, freq="h", use_future_exog=known_future)
-            adapter.config.enc_in = adapter.config.series_dim = 1
-            adapter.config.criterion = torch.nn.L1Loss()
-            model = Nmask2Model(adapter.config)
-            output, auxiliary = model(torch.randn(2, 16, 1), None, None,
-                                      torch.randn(2, 16, 4), torch.randn(2, 3, 4))
-            self.assertEqual(output.shape, (2, 3, 1))
-            self.assertEqual(auxiliary, 0)
-            output.square().mean().backward()
-            self.assertTrue(torch.isfinite(output).all())
+            for calendar_attn in (True, False):
+                with self.subTest(known_future=known_future, calendar_attn=calendar_attn):
+                    adapter = Nmask2(
+                        seq_len=16, horizon=3, patch_len=4, stride=4,
+                        d_model=8, d_ff=16, n_heads=2, e_layers=1, dropout=0.0,
+                        use_calendar_exog=True, freq="h", use_future_exog=known_future,
+                        calendar_temporal_attn=calendar_attn,
+                    )
+                    adapter.config.enc_in = adapter.config.series_dim = 1
+                    adapter.config.criterion = torch.nn.L1Loss()
+                    model = Nmask2Model(adapter.config)
+                    output, auxiliary = model(
+                        torch.randn(2, 16, 1), None, None,
+                        torch.randn(2, 16, 4), torch.randn(2, 3, 4),
+                    )
+                    self.assertEqual(output.shape, (2, 3, 1))
+                    self.assertEqual(auxiliary, 0)
+                    output.square().mean().backward()
+                    self.assertTrue(torch.isfinite(output).all())
 
     def test_calendar_sampling_frequency_and_rolling_timestamp_alignment(self):
         import numpy as np

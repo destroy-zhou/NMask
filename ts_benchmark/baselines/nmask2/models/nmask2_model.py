@@ -55,6 +55,7 @@ class Nmask2Model(nn.Module):
             temporal_attn_scope=config.temporal_attn_scope,
             architecture=config.architecture,
             covariate_layers=config.covariate_layers,
+            calendar_temporal_attn=config.calendar_temporal_attn,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

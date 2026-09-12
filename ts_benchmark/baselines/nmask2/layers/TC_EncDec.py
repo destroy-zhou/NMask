@@ -46,7 +46,8 @@ class TemporalCausalityEncoder(nn.Module):
                  channel_attn_mode="rope", channel_attn_type="local_summary",
                  channel_window=1, channel_summaries=4, local_time_rope=True,
                  temporal_attn_scope="target_only", architecture="encoder_decoder",
-                 covariate_layers=1, channel_fusion_mode="dot", calendar_channels=0
+                 covariate_layers=1, channel_fusion_mode="dot", calendar_channels=0,
+                 calendar_temporal_attn=True
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -56,6 +57,9 @@ class TemporalCausalityEncoder(nn.Module):
         self.c_in = enc_in
         self.calendar_channels = calendar_channels
         self.regular_covariates = enc_in - series_dim - calendar_channels
+        if not isinstance(calendar_temporal_attn, bool):
+            raise ValueError("calendar_temporal_attn must be a boolean")
+        self.calendar_temporal_attn = calendar_temporal_attn
         if calendar_channels and channel_attn_type != "local_summary":
             raise ValueError("Calendar covariates require local_summary attention")
         self.pad_method = pad_method
@@ -65,6 +69,8 @@ class TemporalCausalityEncoder(nn.Module):
         if architecture not in ("encoder_decoder", "joint"):
             raise ValueError("architecture must be encoder_decoder or joint")
         self.architecture = architecture
+        if calendar_channels and not calendar_temporal_attn and architecture != "encoder_decoder":
+            raise ValueError("calendar_temporal_attn=false requires architecture=encoder_decoder")
         if architecture == "encoder_decoder":
             if not 0 < series_dim < enc_in:
                 raise ValueError("encoder_decoder requires at least one target and one covariate")
@@ -309,10 +315,26 @@ class TemporalCausalityEncoder(nn.Module):
         if self.architecture == "encoder_decoder":
             patches = patch_x.reshape(B, self.c_in, patch_x.shape[-2], patch_x.shape[-1])
             targets, covariates = patches[:, :X_D], patches[:, X_D:]
-            memory, _ = self.covariate_encoder(
-                covariates.reshape(B * EXOG_D, covariates.shape[-2], covariates.shape[-1]), EXOG_D,
-            )
-            memory = memory.reshape_as(covariates)
+            if self.calendar_channels and not self.calendar_temporal_attn:
+                # Keep deterministic calendar features strictly patch-local.
+                # Ordinary covariates retain the configured temporal encoder.
+                regular = covariates[:, :self.regular_covariates]
+                calendar = covariates[:, self.regular_covariates:]
+                if self.regular_covariates:
+                    regular_memory, _ = self.covariate_encoder(
+                        regular.reshape(B * self.regular_covariates,
+                                        regular.shape[-2], regular.shape[-1]),
+                        self.regular_covariates,
+                    )
+                    regular_memory = regular_memory.reshape_as(regular)
+                    memory = torch.cat((regular_memory, calendar), dim=1)
+                else:
+                    memory = calendar
+            else:
+                memory, _ = self.covariate_encoder(
+                    covariates.reshape(B * EXOG_D, covariates.shape[-2], covariates.shape[-1]), EXOG_D,
+                )
+                memory = memory.reshape_as(covariates)
             targets = self.target_decoder(targets, memory)
             # Keep the existing prediction/auxiliary heads and output contract.
             enc_x_out = torch.cat((targets, memory), dim=1)

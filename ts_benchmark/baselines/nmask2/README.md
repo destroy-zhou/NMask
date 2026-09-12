@@ -85,14 +85,19 @@ The adapter passes historical and future time marks into the model. Only the
 last `pred_len` target marks are used for future patches; preceding label marks
 are ignored. Calendar features retain their fixed scaling rather than per-window
 normalization. They are appended after ordinary covariates and use the shared
-patch embedding and existing covariate temporal processing.
+patch embedding. With `calendar_temporal_attn=true` (default), they pass through
+the existing covariate temporal encoder. Setting it to false keeps calendar
+patches out of that encoder while ordinary covariates are still encoded in time.
+The false mode requires `architecture=encoder_decoder`.
 
 In local-summary channel interaction, calendar channels always use W=1/R=0:
 only the same-index local slot is allowed, with neighboring and summary slots
 masked out. Ordinary covariates retain `channel_window`/`channel_summaries`.
 Calendar and ordinary contexts then participate together in the selected
 dot/qk/mlp/cross_attn fusion. This rule restricts direct channel-attention reads;
-the temporal encoder can still mix calendar information across patches.
+the temporal encoder can still mix calendar information across patches when
+`calendar_temporal_attn=true`. When it is false, each calendar memory patch
+remains position-local.
 
 Calendar timestamps remain known when `use_future_exog=false`; they are not
 replaced by future placeholders or included in auxiliary covariate prediction
