@@ -358,6 +358,7 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         self.assertEqual(adapter.config.covariate_layers, 1)
         self.assertTrue(adapter.config.calendar_temporal_attn)
         self.assertFalse(adapter.config.covariate_calendar_attn)
+        self.assertFalse(adapter.config.use_patch_mask_embedding)
         for options in ({"architecture": "bad"}, {"covariate_layers": 0},
                         {"covariate_layers": True}, {"covariate_layers": 1.5},
                         {"channel_attn_type": "full"}, {"temporal_attn_scope": "all"}):
@@ -426,7 +427,8 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
             for window, summaries in ((1, 0), (5, 10)):
                 with self.subTest(method=method, window=window, summaries=summaries):
                     model = self.new_model(predict_method=method, horizon=3,
-                                           channel_window=window, channel_summaries=summaries)
+                                           channel_window=window, channel_summaries=summaries,
+                                           use_patch_mask_embedding=True)
                     result, _ = model(torch.randn(2, 16, 5), torch.randn(2, 3, 3), None)
                     self.assertEqual(result.shape, (2, 3, 2))
                     self.assertTrue(torch.isfinite(result).all())
@@ -667,6 +669,8 @@ class Nmask2CalendarTests(unittest.TestCase):
             Nmask2(seq_len=16, calendar_temporal_attn=0)
         with self.assertRaisesRegex(ValueError, "boolean"):
             Nmask2(seq_len=16, covariate_calendar_attn=1)
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            Nmask2(seq_len=16, use_patch_mask_embedding=1)
         with self.assertRaisesRegex(ValueError, "use_calendar_exog"):
             Nmask2(seq_len=16, covariate_calendar_attn=True)
         with self.assertRaisesRegex(ValueError, "local_summary"):
@@ -688,6 +692,65 @@ class Nmask2CalendarTests(unittest.TestCase):
         adapter.config.criterion = torch.nn.L1Loss()
         with self.assertRaisesRegex(ValueError, "ordinary covariates"):
             Nmask2Model(adapter.config)
+
+    def test_patch_mask_embedding_tracks_value_availability(self):
+        x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        past, future_mark = torch.randn(2, 16, 4), torch.randn(2, 8, 4)
+        history_mask = torch.cat((torch.ones(4, 4), torch.zeros(1, 4)))
+        known_future_mask = torch.cat((torch.ones(2, 4), torch.zeros(1, 4)))
+        unknown_future_mask = torch.zeros(3, 4)
+
+        for known_future in (False, True):
+            with self.subTest(known_future=known_future):
+                model = self.make_model(
+                    architecture="encoder_decoder", future=known_future,
+                    use_calendar_exog=True, freq="h",
+                    use_patch_mask_embedding=True,
+                ).train()
+                captured = []
+                handle = model.temporal_encoder.patch_mask_embedding.register_forward_pre_hook(
+                    lambda module, args: captured.append(args[0].detach().clone())
+                )
+                try:
+                    prediction, auxiliary = model(x, exog, None, past, future_mark)
+                finally:
+                    handle.remove()
+
+                expected_target = torch.cat((history_mask, unknown_future_mask))
+                expected_regular = torch.cat((
+                    history_mask,
+                    known_future_mask if known_future else unknown_future_mask,
+                ))
+                expected_calendar = torch.cat((history_mask, known_future_mask))
+                expected = torch.cat((
+                    expected_target.repeat(2, 1, 1),
+                    expected_regular.repeat(3, 1, 1),
+                    expected_calendar.repeat(4, 1, 1),
+                )).unsqueeze(0).repeat(2, 1, 1, 1)
+                torch.testing.assert_close(captured[0], expected)
+
+                (prediction.square().mean() + auxiliary).backward()
+                embedding = model.temporal_encoder.patch_mask_embedding
+                self.assertGreater(embedding.weight.grad.abs().sum().item(), 0)
+                self.assertGreater(embedding.bias.grad.abs().sum().item(), 0)
+
+                partial = model.temporal_encoder._patch_observation_mask(
+                    1, 1, 6, True, x,
+                )
+                torch.testing.assert_close(
+                    partial,
+                    torch.tensor([[[[1., 1., 1., 1.], [1., 1., 0., 0.]]]]),
+                )
+
+        joint = self.make_model(
+            mode="embedding", future=False, use_patch_mask_embedding=True,
+        ).train()
+        joint_prediction, joint_auxiliary = joint(x, exog, None)
+        (joint_prediction.square().mean() + joint_auxiliary).backward()
+        self.assertGreater(
+            joint.temporal_encoder.patch_mask_embedding.weight.grad.abs().sum().item(),
+            0,
+        )
 
     def test_calendar_temporal_attention_can_be_bypassed_independently(self):
         x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
@@ -870,6 +933,7 @@ class Nmask2CalendarTests(unittest.TestCase):
                         d_model=8, d_ff=16, n_heads=2, e_layers=1, dropout=0.0,
                         use_calendar_exog=True, freq="h", use_future_exog=known_future,
                         calendar_temporal_attn=calendar_attn,
+                        use_patch_mask_embedding=True,
                     )
                     adapter.config.enc_in = adapter.config.series_dim = 1
                     adapter.config.criterion = torch.nn.L1Loss()
@@ -881,6 +945,10 @@ class Nmask2CalendarTests(unittest.TestCase):
                     self.assertEqual(output.shape, (2, 3, 1))
                     self.assertEqual(auxiliary, 0)
                     output.square().mean().backward()
+                    self.assertGreater(
+                        model.temporal_encoder.patch_mask_embedding.weight.grad.abs().sum().item(),
+                        0,
+                    )
                     self.assertTrue(torch.isfinite(output).all())
 
     def test_calendar_sampling_frequency_and_rolling_timestamp_alignment(self):

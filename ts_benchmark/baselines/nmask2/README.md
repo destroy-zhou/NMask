@@ -33,6 +33,7 @@ values are used as input. At least one target and one covariate are required.
   "channel_summaries": 4,
   "local_time_rope": true,
   "channel_attn_mode": "rope",
+  "use_patch_mask_embedding": false,
   "use_future_exog": true
 }
 ```
@@ -42,6 +43,13 @@ covariate encoder depth (positive integer, default 1). New architecture defaults
 are W=1, R=4. `channel_attn_type=local_summary` and
 `temporal_attn_scope=target_only` are required for `encoder_decoder`; incompatible
 explicit values raise an error rather than silently changing the architecture.
+
+Set `use_patch_mask_embedding=true` to add an availability embedding to every
+value patch. A shared `Linear(patch_len, d_model)` projects the binary mask and
+its output is added to the patch representation. Historical observations,
+known future covariates and calendar values use 1; future targets, unavailable
+future covariates and right-padding positions use 0. This applies to both
+architectures and defaults to false for checkpoint compatibility.
 
 Each target patch attends separately to W local patches and R adaptive-average
 summaries **per covariate**. A target-dependent softmax across covariates then

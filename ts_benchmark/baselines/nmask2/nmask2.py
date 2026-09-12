@@ -49,6 +49,7 @@ MODEL_HYPER_PARAMS = {
     "use_calendar_exog": False,  # append time marks as known future covariates
     "calendar_temporal_attn": True,  # False keeps calendar patches position-local
     "covariate_calendar_attn": False,  # let ordinary covariates read calendar patches
+    "use_patch_mask_embedding": False,  # add a projected observed/missing mask to each patch
     "channel_fusion_mode": "dot",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
@@ -81,6 +82,8 @@ class Nmask2(DeepForecastingModelBase):
             raise ValueError("calendar_temporal_attn must be a boolean")
         if not isinstance(self.config.covariate_calendar_attn, bool):
             raise ValueError("covariate_calendar_attn must be a boolean")
+        if not isinstance(self.config.use_patch_mask_embedding, bool):
+            raise ValueError("use_patch_mask_embedding must be a boolean")
         if self.config.covariate_calendar_attn and not self.config.use_calendar_exog:
             raise ValueError("covariate_calendar_attn requires use_calendar_exog=true")
         if self.config.use_calendar_exog and self.config.channel_attn_type != "local_summary":

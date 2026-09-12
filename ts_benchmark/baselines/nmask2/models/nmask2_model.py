@@ -57,6 +57,7 @@ class Nmask2Model(nn.Module):
             covariate_layers=config.covariate_layers,
             calendar_temporal_attn=config.calendar_temporal_attn,
             covariate_calendar_attn=config.covariate_calendar_attn,
+            use_patch_mask_embedding=config.use_patch_mask_embedding,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

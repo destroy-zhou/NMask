@@ -47,7 +47,8 @@ class TemporalCausalityEncoder(nn.Module):
                  channel_window=1, channel_summaries=4, local_time_rope=True,
                  temporal_attn_scope="target_only", architecture="encoder_decoder",
                  covariate_layers=1, channel_fusion_mode="dot", calendar_channels=0,
-                 calendar_temporal_attn=True, covariate_calendar_attn=False
+                 calendar_temporal_attn=True, covariate_calendar_attn=False,
+                 use_patch_mask_embedding=False
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -61,6 +62,8 @@ class TemporalCausalityEncoder(nn.Module):
             raise ValueError("calendar_temporal_attn must be a boolean")
         if not isinstance(covariate_calendar_attn, bool):
             raise ValueError("covariate_calendar_attn must be a boolean")
+        if not isinstance(use_patch_mask_embedding, bool):
+            raise ValueError("use_patch_mask_embedding must be a boolean")
         self.calendar_temporal_attn = calendar_temporal_attn
         self.use_covariate_calendar_attn = covariate_calendar_attn
         if covariate_calendar_attn and (not calendar_channels or not self.regular_covariates):
@@ -113,6 +116,9 @@ class TemporalCausalityEncoder(nn.Module):
         # )
         self.x_patch_embedding = PatchEmbedding(
             d_model, patch_len, stride, padding, dropout
+        )
+        self.patch_mask_embedding = (
+            nn.Linear(patch_len, d_model) if use_patch_mask_embedding else None
         )
         self.position_embedding = PositionalEmbedding(d_model)
 
@@ -246,6 +252,16 @@ class TemporalCausalityEncoder(nn.Module):
             )
         
 
+    def _patch_observation_mask(self, batch, channels, length, observed, reference):
+        """Build masks with the same right padding and unfolding as value patches."""
+        mask = reference.new_full((batch, channels, length), float(observed))
+        mask = F.pad(mask, (0, self.x_patch_embedding.patch_len))
+        return mask.unfold(
+            dimension=-1,
+            size=self.x_patch_embedding.patch_len,
+            step=self.x_patch_embedding.stride,
+        )
+
     def forward(self, x, exog_future, use_exog=True, input_mark=None, target_mark=None):
         exog_history = x[:, :, self.series_dim:]
         x_history = x[:, :, :self.series_dim]
@@ -311,6 +327,17 @@ class TemporalCausalityEncoder(nn.Module):
         x_future = self.x_future.expand(B, -1, -1, -1)
         patch_x = torch.cat([patch_x, x_future], dim=-2)
         patch_exog = patch_exog.view(B, EXOG_D, patch_exog.shape[-2], patch_exog.shape[-1])
+        if self.patch_mask_embedding is not None:
+            target_mask = torch.cat((
+                self._patch_observation_mask(B, X_D, L, True, x),
+                self._patch_observation_mask(B, X_D, self.pred_len, False, x),
+            ), dim=-2)
+            regular_mask = torch.cat((
+                self._patch_observation_mask(B, EXOG_D, L, True, x),
+                self._patch_observation_mask(
+                    B, EXOG_D, self.pred_len, self.use_future_exog, x,
+                ),
+            ), dim=-2)
         if self.calendar_channels:
             # Time marks already use fixed calendar scaling. Avoid per-window
             # centering, which would erase constant weekday/month information.
@@ -319,10 +346,23 @@ class TemporalCausalityEncoder(nn.Module):
             calendar = torch.cat((calendar_history, calendar_future), dim=1)
             calendar = calendar.reshape(B, self.calendar_channels, calendar.shape[-2], calendar.shape[-1])
             patch_exog = torch.cat((patch_exog, calendar), dim=1)
+            if self.patch_mask_embedding is not None:
+                calendar_mask = torch.cat((
+                    self._patch_observation_mask(B, self.calendar_channels, L, True, x),
+                    self._patch_observation_mask(
+                        B, self.calendar_channels, self.pred_len, True, x,
+                    ),
+                ), dim=-2)
+                regular_mask = torch.cat((regular_mask, calendar_mask), dim=1)
             EXOG_D += self.calendar_channels
         # print(f"{patch_x.shape = }, {patch_exog.shape = }")
 
         patch_x = torch.cat([patch_x, patch_exog], dim=1)
+        if self.patch_mask_embedding is not None:
+            patch_mask = torch.cat((target_mask, regular_mask), dim=1)
+            if patch_mask.shape[:3] != patch_x.shape[:3]:
+                raise RuntimeError("Patch mask and value patch layouts are not aligned")
+            patch_x = patch_x + self.patch_mask_embedding(patch_mask)
         # print(f"{patch_x.shape = }")
         patch_x = patch_x.view(-1, patch_x.shape[-2], patch_x.shape[-1])
         if not self.use_rope:
