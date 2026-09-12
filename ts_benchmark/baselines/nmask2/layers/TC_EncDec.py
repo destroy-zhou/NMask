@@ -145,6 +145,14 @@ class TemporalCausalityEncoder(nn.Module):
                     channel_summaries, local_time_rope, channel_fusion_mode, calendar_channels,
                 ) for _ in range(e_layers)
             ], d_model)
+            if self.covariate_calendar_decoder is not None:
+                # Both streams use the same learned channel-attention transforms.
+                # Their layouts, masks and variable embeddings remain separate.
+                for index, layer in enumerate(self.covariate_calendar_decoder.layers):
+                    target_index = min(index, len(self.target_decoder.layers) - 1)
+                    layer.cross_attention.share_attention_projections_from(
+                        self.target_decoder.layers[target_index].cross_attention
+                    )
         else:
             self.encoder_x = self._build_encoder(
                 d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=False,

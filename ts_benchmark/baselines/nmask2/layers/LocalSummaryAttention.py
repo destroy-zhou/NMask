@@ -69,6 +69,25 @@ class LocalSummaryAttention(nn.Module):
             self.channel_embedding = nn.Parameter(torch.empty(1, n_channels, 1, d_model))
             nn.init.normal_(self.channel_embedding, std=0.02)
 
+    def share_attention_projections_from(self, other):
+        """Tie attention projections while retaining stream-specific layout state."""
+        if not isinstance(other, LocalSummaryAttention):
+            raise TypeError("Attention projections can only be shared with LocalSummaryAttention")
+        if (self.n_heads != other.n_heads or self.head_dim != other.head_dim
+                or self.mode != other.mode
+                or self.channel_fusion_mode != other.channel_fusion_mode):
+            raise ValueError("Shared channel attention requires matching attention settings")
+        names = (
+            "query_projection", "key_projection", "value_projection",
+            "out_projection", "gate_query", "gate_key", "gate_value", "gate_mlp",
+        )
+        for name in names:
+            source = getattr(other, name)
+            if (getattr(self, name) is None) != (source is None):
+                raise ValueError("Shared channel attention requires matching fusion projections")
+            if source is not None:
+                setattr(self, name, source)
+
     def _rotate_channels(self, tensor):
         # [B, C, P, H, d] -> rotate along C, never along local memory slots.
         b, c, p, h, d = tensor.shape

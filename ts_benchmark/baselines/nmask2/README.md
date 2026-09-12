@@ -107,6 +107,10 @@ remain read-only and restricted to W=1/R=0; ordinary covariates are updated,
 while calendar channels are not. `covariate_layers` controls this decoder
 depth. This option defaults to false, requires `use_calendar_exog=true`, at
 least one ordinary covariate, and `architecture=encoder_decoder`.
+Its channel-attention projection modules are automatically shared with the
+corresponding target decoder layer. Extra conditioning layers share with the
+final target layer. Temporal attention, FFNs, channel layouts, masks and
+variable embeddings remain stream-specific. No extra hyperparameter is needed.
 
 Calendar timestamps remain known when `use_future_exog=false`; they are not
 replaced by future placeholders or included in auxiliary covariate prediction

@@ -745,6 +745,32 @@ class Nmask2CalendarTests(unittest.TestCase):
         encoder_grad = train_model.temporal_encoder.covariate_encoder.attn_layers[0].attention
         self.assertGreater(encoder_grad.value_projection.weight.grad.abs().sum().item(), 0)
 
+    def test_covariate_calendar_attention_shares_projections_in_all_fusion_modes(self):
+        for fusion in ("dot", "qk", "mlp", "cross_attn"):
+            with self.subTest(fusion=fusion):
+                model = self.make_model(
+                    mode="embedding", architecture="encoder_decoder",
+                    use_calendar_exog=True, freq="h",
+                    covariate_calendar_attn=True,
+                    channel_fusion_mode=fusion, e_layers=2, covariate_layers=3,
+                )
+                core = model.temporal_encoder
+                common = (
+                    "query_projection", "key_projection", "value_projection",
+                    "out_projection", "gate_query",
+                )
+                optional = {
+                    "dot": (), "qk": ("gate_key",), "mlp": ("gate_mlp",),
+                    "cross_attn": ("gate_key", "gate_value"),
+                }[fusion]
+                for index, layer in enumerate(core.covariate_calendar_decoder.layers):
+                    source = core.target_decoder.layers[min(index, 1)].cross_attention
+                    for name in common + optional:
+                        self.assertIs(getattr(layer.cross_attention, name),
+                                      getattr(source, name))
+                parameters = list(model.parameters())
+                self.assertEqual(len(parameters), len({id(parameter) for parameter in parameters}))
+
     def test_ordinary_covariates_can_attend_to_read_only_calendar(self):
         model = self.make_model(
             mode="embedding", architecture="encoder_decoder",
@@ -753,6 +779,17 @@ class Nmask2CalendarTests(unittest.TestCase):
         ).train()
         core = model.temporal_encoder
         conditioner = core.covariate_calendar_decoder
+        covariate_attention = conditioner.layers[0].cross_attention
+        target_attention = core.target_decoder.layers[0].cross_attention
+        for name in (
+            "query_projection", "key_projection", "value_projection",
+            "out_projection", "gate_query", "gate_key", "gate_value",
+        ):
+            self.assertIs(getattr(covariate_attention, name), getattr(target_attention, name))
+        self.assertIsNot(covariate_attention.channel_embedding,
+                         target_attention.channel_embedding)
+        self.assertIsNot(conditioner.layers[0].linear1,
+                         core.target_decoder.layers[0].linear1)
         inputs, decoder_memory = [], []
         handles = [
             conditioner.register_forward_pre_hook(
@@ -797,9 +834,11 @@ class Nmask2CalendarTests(unittest.TestCase):
         ):
             self.assertIsNotNone(projection.weight.grad)
             self.assertGreater(projection.weight.grad.abs().sum().item(), 0)
-        # Each calendar variable exposes exactly one W=1/R=0 time slot, so its
-        # within-variable temporal softmax is constant and does not train Q.
-        self.assertEqual(attention.query_projection.weight.grad.abs().sum().item(), 0)
+        # The calendar-only local softmax has one slot per variable, while the
+        # shared target path also trains this projection against ordinary exog.
+        self.assertGreater(
+            attention.query_projection.weight.grad.abs().sum().item(), 0,
+        )
 
         restored = self.make_model(
             mode="embedding", architecture="encoder_decoder",
