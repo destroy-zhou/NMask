@@ -473,6 +473,63 @@ class Nmask2FusionTests(unittest.TestCase):
             x = torch.randn(2, 4, 5, 8, dtype=torch.float64)
             torch.testing.assert_close(dot(x), qk(x), rtol=1e-12, atol=1e-12)
 
+    def test_cross_attention_matches_pytorch_multihead_attention(self):
+        for mode in ("none", "embedding"):
+            module = LocalSummaryAttention(8, 2, 5, 2, window=1, summaries=0,
+                                           mode=mode, channel_fusion_mode="cross_attn").double()
+            reference = torch.nn.MultiheadAttention(8, 2, batch_first=True).double()
+            with torch.no_grad():
+                reference.in_proj_weight.copy_(torch.cat([
+                    module.gate_query.weight, module.gate_key.weight, module.gate_value.weight]))
+                reference.in_proj_bias.copy_(torch.cat([
+                    module.gate_query.bias, module.gate_key.bias, module.gate_value.bias]))
+                reference.out_proj.load_state_dict(module.out_projection.state_dict())
+            x = torch.randn(2, 5, 3, 8, dtype=torch.float64, requires_grad=True)
+            context = module.value_projection(x[:, 2:]).permute(0, 2, 1, 3)
+            context = context[:, None].expand(2, 2, 3, 3, 8)
+            q_input, k_input = x[:, :2], context
+            if mode == "embedding":
+                q_input = q_input + module.channel_embedding[:, :2]
+                identity = torch.nn.functional.linear(module.channel_embedding[:, 2:, 0], module.key_projection.weight)
+                k_input = k_input + identity[:, None, None]
+            expected, _ = reference(q_input.reshape(12, 1, 8),
+                                    k_input.reshape(12, 3, 8), context.reshape(12, 3, 8),
+                                    need_weights=False)
+            expected = expected.reshape(2, 2, 3, 8)
+            actual = module(x)
+            torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
+            actual_grad = torch.autograd.grad(actual.sum(), x, retain_graph=True)[0]
+            expected_grad = torch.autograd.grad(expected.sum(), x)[0]
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-10, atol=1e-10)
+
+    def test_cross_attention_architectures_heads_gradients_and_checkpoints(self):
+        for architecture in ("encoder_decoder", "joint"):
+            for mode in ("none", "rope", "embedding"):
+                options = dict(mode=mode, architecture=architecture, d_model=12, heads=4,
+                               channel_attn_type="local_summary", channel_fusion_mode="cross_attn")
+                model = self.make_model(**options)
+                x, future = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                result, _ = model(x, future, None)
+                self.assertEqual(result.shape, (2, 8, 2))
+                result.square().mean().backward()
+                for module in model.modules():
+                    if not isinstance(module, LocalSummaryAttention):
+                        continue
+                    self.assertEqual(module.n_heads, 4)
+                    for projection in (module.gate_query, module.gate_key, module.gate_value, module.out_projection):
+                        self.assertTrue(torch.isfinite(projection.weight.grad).all())
+                        self.assertGreater(projection.weight.grad.abs().sum().item(), 0)
+                restored = self.make_model(**options)
+                restored.load_state_dict(model.state_dict())
+                model.eval()
+                restored.eval()
+                with torch.no_grad():
+                    output = restored(x, future, None)[0]
+                    torch.testing.assert_close(model(x, future, None)[0], output, rtol=0, atol=0)
+                    torch.testing.assert_close(restored(x[:1], future[:1], None)[0], output[:1], rtol=1e-5, atol=1e-6)
+        with self.assertRaisesRegex(ValueError, "local_summary"):
+            Nmask2(seq_len=16, architecture="joint", channel_fusion_mode="cross_attn")
+
     def test_fusion_scores_match_reference_and_values_are_unprojected(self):
         # W=1/R=0 makes each per-variable context exactly its V projection,
         # so we can check the full fusion independently of local attention.

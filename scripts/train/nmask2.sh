@@ -6,7 +6,7 @@
 # Fixed parameters follow scripts/covariate_forecasting/nmask2.sh (server configuration).
 
 # architecture=encoder_decoder; covariate_layers=1; temporal_attn_scope=target_only.
-# channel_fusion_mode=dot (dot | qk | mlp).
+# channel_fusion_mode=dot (dot | qk | mlp | cross_attn).
 # channel_attn_type=local_summary; channel_window=1; channel_summaries=4; channel_attn_mode=embedding.
 
 set -e

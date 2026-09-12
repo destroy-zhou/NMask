@@ -19,8 +19,8 @@ def validate_channel_attention(attention_type, window, summaries):
 
 
 def validate_channel_fusion(mode):
-    if mode not in ("dot", "qk", "mlp"):
-        raise ValueError("channel_fusion_mode must be dot, qk or mlp")
+    if mode not in ("dot", "qk", "mlp", "cross_attn"):
+        raise ValueError("channel_fusion_mode must be dot, qk, mlp or cross_attn")
 
 
 class LocalSummaryAttention(nn.Module):
@@ -52,7 +52,8 @@ class LocalSummaryAttention(nn.Module):
         validate_channel_fusion(channel_fusion_mode)
         self.channel_fusion_mode = channel_fusion_mode
         # Only optional modes add parameters, preserving existing dot checkpoints.
-        self.gate_key = nn.Linear(width, width, bias=False) if channel_fusion_mode == "qk" else None
+        self.gate_key = nn.Linear(width, width, bias=channel_fusion_mode == "cross_attn") if channel_fusion_mode in ("qk", "cross_attn") else None
+        self.gate_value = nn.Linear(width, width) if channel_fusion_mode == "cross_attn" else None
         self.gate_mlp = nn.Sequential(
             nn.Linear(2 * width, min(64, width)), nn.GELU(),
             nn.Linear(min(64, width), 1, bias=False),
@@ -148,6 +149,16 @@ class LocalSummaryAttention(nn.Module):
             # Without time RoPE, a constant K offset cancels within a variable.
             identities = F.linear(self.channel_embedding[:, s:, 0], self.key_projection.weight)
             gate_keys = context + identities[:, None, None]
+        if self.channel_fusion_mode == "cross_attn":
+            # Each target patch is one query; covariates are the key/value axis.
+            # Q/K/V projections span all heads, followed by per-head softmax.
+            fusion_q = gate_query.reshape(b, s, p, h, d)
+            fusion_k = self.gate_key(gate_keys).reshape(b, s, p, c - s, h, d)
+            fusion_v = self.gate_value(context).reshape(b, s, p, c - s, h, d)
+            fusion_scores = torch.einsum("bsphd,bspehd->bsphe", fusion_q, fusion_k) / math.sqrt(d)
+            fusion_weights = self.dropout(torch.softmax(fusion_scores, dim=-1))
+            fused = torch.einsum("bsphe,bspehd->bsphd", fusion_weights, fusion_v)
+            return self.out_projection(fused.reshape(b, s, p, h * d))
         if self.channel_fusion_mode == "qk":
             gate_keys = self.gate_key(gate_keys)
         if self.channel_fusion_mode == "mlp":

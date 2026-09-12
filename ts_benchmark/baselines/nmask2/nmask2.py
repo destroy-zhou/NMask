@@ -43,7 +43,7 @@ MODEL_HYPER_PARAMS = {
     "channel_attn_type": "local_summary",  # full is supported by joint only
     "channel_window": 1,
     "channel_summaries": 4,
-    "channel_fusion_mode": "dot",  # dot | qk | mlp; local_summary variable fusion
+    "channel_fusion_mode": "dot",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
 
@@ -71,7 +71,7 @@ class Nmask2(DeepForecastingModelBase):
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
         validate_channel_fusion(self.config.channel_fusion_mode)
         if self.config.channel_attn_type != "local_summary" and self.config.channel_fusion_mode != "dot":
-            raise ValueError("channel_fusion_mode qk/mlp requires channel_attn_type=local_summary")
+            raise ValueError("channel_fusion_mode qk/mlp/cross_attn requires channel_attn_type=local_summary")
         if self.config.architecture not in ("encoder_decoder", "joint"):
             raise ValueError("architecture must be encoder_decoder or joint")
         if self.config.architecture == "encoder_decoder":

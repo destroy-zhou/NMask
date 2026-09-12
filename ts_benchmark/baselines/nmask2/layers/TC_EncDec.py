@@ -77,7 +77,7 @@ class TemporalCausalityEncoder(nn.Module):
         self.local_time_rope = local_time_rope
         validate_channel_fusion(channel_fusion_mode)
         if channel_attn_type != "local_summary" and channel_fusion_mode != "dot":
-            raise ValueError("channel_fusion_mode qk/mlp requires channel_attn_type=local_summary")
+            raise ValueError("channel_fusion_mode qk/mlp/cross_attn requires channel_attn_type=local_summary")
         self.channel_fusion_mode = channel_fusion_mode
         self.temporal_attn_scope = temporal_attn_scope
         stride = patch_len

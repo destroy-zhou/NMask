@@ -81,19 +81,31 @@ each variable's local/summary attention. It works in both architectures when
 | `dot` (default) | `q = gate_query(target); score = dot(q, z) / sqrt(width)` |
 | `qk` | `score = dot(q, gate_key(z)) / sqrt(width)` |
 | `mlp` | `score = Linear(GELU(Linear(concat(q, z))))` |
+| `cross_attn` | Standard multi-head cross-attention, with `n_heads` heads and Q/K/V/output projections |
 
 When variable embeddings are enabled, their existing contribution is added to
-z before scoring (including before the new key projection). Values are always
-the original per-variable context: neither the key projection nor the scorer
-changes the values being fused. All modes softmax over variables only.
+z before scoring (including before the new key projection). In dot/qk/mlp modes,
+values remain the original per-variable context. In cross_attn mode, a learned
+V projection transforms that context without the variable identity addition.
+All modes softmax over variables only.
 
 The MLP is shared across variables, target channels and patches within each
 layer. Its hidden size is `min(64, n_heads * head_dim)` and its output is one
 scalar per variable. Different decoder layers have independent scorers.
 QK mode adds a bias-free `width -> width` key projection. No extra V projection
-is added. Default dot mode preserves the existing parameter layout and behavior.
+is added in qk mode. Default dot mode preserves the existing parameter layout and behavior.
 Train the new modes separately; their additional parameters require matching
 checkpoint configurations.
+
+`cross_attn` replaces the second-stage scalar gate with standard multi-head
+cross-attention. Each target patch is one Q token; its per-covariate contexts
+are the K/V tokens. The head count equals `n_heads`, with the same `head_dim`
+as local attention (including its existing dimension rounding). Each head
+uses `softmax(Q K^T / sqrt(head_dim))` over covariates, attention dropout, and
+projected V. Concatenated heads pass through the existing output projection.
+There is no second scalar fusion gate. The first-stage local/summary attention
+is unchanged. Set `"channel_fusion_mode": "cross_attn"` to enable it in either
+architecture with local_summary; train it with matching checkpoint settings.
 
 For example, add `"channel_fusion_mode": "qk"` or
 `"channel_fusion_mode": "mlp"` to `--model-hyper-params` and use a separate
