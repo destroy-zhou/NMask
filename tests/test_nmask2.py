@@ -743,7 +743,8 @@ class Nmask2CalendarTests(unittest.TestCase):
                 )
 
         joint = self.make_model(
-            mode="embedding", future=False, use_patch_mask_embedding=True,
+            mode="embedding", future=False, use_calendar_exog=False,
+            use_patch_mask_embedding=True,
         ).train()
         joint_prediction, joint_auxiliary = joint(x, exog, None)
         (joint_prediction.square().mean() + joint_auxiliary).backward()
