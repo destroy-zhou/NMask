@@ -70,6 +70,37 @@ supervise that auxiliary head during training, but are never forward inputs.
 
 ## Running
 
+### Calendar covariates
+
+Set `"use_calendar_exog": true` to append each existing time-mark feature as
+an extra covariate channel. Default is false, preserving previous checkpoints
+and predictions. Hourly inputs use hour-of-day, day-of-week, day-of-month and
+day-of-year; other frequencies use the data loader's corresponding features.
+This does not add public-holiday data. No CSV modification is needed.
+With calendar channels enabled, nmask2 preserves the full inferred sampling
+frequency (for example `10min` or `2h`) in training and future timestamp
+generation, rather than reducing it to a unit or single-character alias.
+
+The adapter passes historical and future time marks into the model. Only the
+last `pred_len` target marks are used for future patches; preceding label marks
+are ignored. Calendar features retain their fixed scaling rather than per-window
+normalization. They are appended after ordinary covariates and use the shared
+patch embedding and existing covariate temporal processing.
+
+In local-summary channel interaction, calendar channels always use W=1/R=0:
+only the same-index local slot is allowed, with neighboring and summary slots
+masked out. Ordinary covariates retain `channel_window`/`channel_summaries`.
+Calendar and ordinary contexts then participate together in the selected
+dot/qk/mlp/cross_attn fusion. This rule restricts direct channel-attention reads;
+the temporal encoder can still mix calendar information across patches.
+
+Calendar timestamps remain known when `use_future_exog=false`; they are not
+replaced by future placeholders or included in auxiliary covariate prediction
+loss. Calendar-only conditioning is supported. Both encoder_decoder and joint
+architectures support this option with `channel_attn_type=local_summary`.
+Enabling it changes the channel count, so retrain using matching configuration
+and data frequency. The base data/scaler channel counts remain unchanged.
+
 ### Variable fusion modes
 
 `channel_fusion_mode` selects the second-stage softmax over covariates after

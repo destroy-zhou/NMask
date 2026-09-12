@@ -2,6 +2,7 @@ from torch import nn
 
 from ts_benchmark.baselines.nmask2.layers.CC_EncDec import CovCausalityEncoder
 from ts_benchmark.baselines.nmask2.layers.TC_EncDec import TemporalCausalityEncoder
+from ts_benchmark.baselines.time_series_library.utils.timefeatures import time_features_from_frequency_str
 
 
 class Nmask2Model(nn.Module):
@@ -21,10 +22,15 @@ class Nmask2Model(nn.Module):
         self.use_future_exog = config.use_future_exog
         self.infer_use_future = config.infer_use_future
         self.criterion = config.criterion
+        self.calendar_channels = (len(time_features_from_frequency_str(config.freq))
+                                  if config.use_calendar_exog else 0)
+        if config.use_calendar_exog and not self.calendar_channels:
+            raise ValueError("No calendar features are available for this frequency")
         assert self.use_c or self.use_t, "At least one of use_c or use_t must be True"
 
         self.temporal_encoder = TemporalCausalityEncoder(
-            enc_in=config.enc_in,
+            enc_in=config.enc_in + self.calendar_channels,
+            calendar_channels=self.calendar_channels,
             seq_len=self.seq_len,
             pred_len=self.pred_len,
             series_dim=config.series_dim,
@@ -85,7 +91,7 @@ class Nmask2Model(nn.Module):
         return lambda_task * loss_task + lambda_distill * loss_distill #+ lambda_feat * loss_feat
 
 
-    def forward(self, input, exog_future, target):
+    def forward(self, input, exog_future, target, input_mark=None, target_mark=None):
         # input: [batch_size, seq_len, n_vars]
         temporal_causality_loss = 0
         cov_causality_loss = 0
@@ -122,8 +128,11 @@ class Nmask2Model(nn.Module):
         #         output, no_future_out, exog_out = self.temporal_encoder(input, None, self.use_t_exog)
         # else:
         #     output, exog_out = self.temporal_encoder(input, exog_future, self.use_t_exog)
-        output, exog_out = self.temporal_encoder(input, exog_future, self.use_t_exog)
-        if self.training and not self.use_future_exog and exog_future is not None:
+        output, exog_out = self.temporal_encoder(
+            input, exog_future, self.use_t_exog, input_mark, target_mark,
+        )
+        if (self.training and not self.use_future_exog and exog_future is not None
+                and self.temporal_encoder.regular_covariates):
             # print(f"{exog_out.shape = }, {exog_future.shape = }")
             causality_loss = self.alpha * self.criterion(exog_out, exog_future)
             # causality_loss = self.compute_loss(exog_out, output, None, None, exog_future)

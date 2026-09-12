@@ -1,9 +1,12 @@
 import torch.nn as nn
+import numpy as np
+import pandas as pd
 
 from ts_benchmark.baselines.nmask2.models.nmask2_model import Nmask2Model
 from ts_benchmark.baselines.nmask2.layers.LocalSummaryAttention import validate_channel_attention, validate_channel_fusion
 from ts_benchmark.baselines.utils import (
     DBLoss,
+    get_time_mark,
 )
 from ..deep_forecasting_model_base import DeepForecastingModelBase
 
@@ -43,6 +46,7 @@ MODEL_HYPER_PARAMS = {
     "channel_attn_type": "local_summary",  # full is supported by joint only
     "channel_window": 1,
     "channel_summaries": 4,
+    "use_calendar_exog": False,  # append time marks as known future covariates
     "channel_fusion_mode": "dot",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
@@ -69,6 +73,10 @@ class Nmask2(DeepForecastingModelBase):
             kwargs.setdefault("channel_window", 5)
             kwargs.setdefault("temporal_attn_scope", "all")
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+        if not isinstance(self.config.use_calendar_exog, bool):
+            raise ValueError("use_calendar_exog must be a boolean")
+        if self.config.use_calendar_exog and self.config.channel_attn_type != "local_summary":
+            raise ValueError("use_calendar_exog requires channel_attn_type=local_summary")
         validate_channel_fusion(self.config.channel_fusion_mode)
         if self.config.channel_attn_type != "local_summary" and self.config.channel_fusion_mode != "dot":
             raise ValueError("channel_fusion_mode qk/mlp/cross_attn requires channel_attn_type=local_summary")
@@ -109,8 +117,30 @@ class Nmask2(DeepForecastingModelBase):
     def _init_model(self):
         return Nmask2Model(self.config)
 
+    def multi_forecasting_hyper_param_tune(self, train_data):
+        super().multi_forecasting_hyper_param_tune(train_data)
+        if self.config.use_calendar_exog:
+            self.config.freq = pd.infer_freq(train_data.index)
+
+    def single_forecasting_hyper_param_tune(self, train_data):
+        super().single_forecasting_hyper_param_tune(train_data)
+        if self.config.use_calendar_exog:
+            self.config.freq = pd.infer_freq(train_data.index)
+
+    def _padding_time_stamp_mark(self, time_stamps_list, padding_len):
+        if not self.config.use_calendar_exog:
+            return super()._padding_time_stamp_mark(time_stamps_list, padding_len)
+        # Preserve multipliers (10min, 2h, ...) and pandas offset spelling.
+        # The base path uppercases/truncates frequency, losing real timestamps.
+        future = np.stack([
+            pd.date_range(start=stamps[-1], periods=padding_len + 1,
+                          freq=self.config.freq)[1:].to_numpy()
+            for stamps in time_stamps_list
+        ])
+        return get_time_mark(np.concatenate((time_stamps_list, future), axis=1), 1, self.config.freq)
+
     def _process(self, input, target, input_mark, target_mark, exog_future=None, epoch=0):
-        output, causality_loss = self.model(input, exog_future, target)
+        output, causality_loss = self.model(input, exog_future, target, input_mark, target_mark)
         # if self.model.training and epoch < self.config.warm_up_epoch:
         #     # output = target
         #     causality_loss *= 2

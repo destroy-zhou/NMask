@@ -585,5 +585,145 @@ class Nmask2FusionTests(unittest.TestCase):
             Nmask2(seq_len=16, architecture="joint", channel_fusion_mode="mlp")
 
 
+class Nmask2CalendarTests(unittest.TestCase):
+    make_model = Nmask2Tests.make_model
+
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_calendar_masks_only_center_and_preserves_regular_attention(self):
+        for mode in ("none", "rope", "embedding"):
+            for fusion in ("dot", "qk", "mlp", "cross_attn"):
+                module = LocalSummaryAttention(8, 2, 5, 1, window=5, summaries=3,
+                                               mode=mode, channel_fusion_mode=fusion,
+                                               calendar_channels=2).eval()
+                regular = LocalSummaryAttention(8, 2, 5, 1, window=5, summaries=3,
+                                                mode=mode, channel_fusion_mode=fusion).eval()
+                regular.load_state_dict(module.state_dict())
+                x = torch.randn(2, 5, 7, 8)
+                captured, reference = [], []
+                a = module.dropout.register_forward_pre_hook(lambda m, args: captured.append(args[0]))
+                b = regular.dropout.register_forward_pre_hook(lambda m, args: reference.append(args[0]))
+                try:
+                    output = module(x)
+                    regular(x)
+                    weights = captured[0]
+                    torch.testing.assert_close(weights[..., :2, :, :], reference[0][..., :2, :, :], rtol=0, atol=0)
+                    calendar_weights = weights[..., -2:, :, :]
+                    expected = torch.zeros_like(calendar_weights)
+                    expected[..., 2] = 1
+                    torch.testing.assert_close(calendar_weights, expected, rtol=0, atol=0)
+                    changed = x.clone()
+                    changed[:, -2:, :3] += torch.randn_like(changed[:, -2:, :3]) * 10
+                    changed[:, -2:, 4:] += torch.randn_like(changed[:, -2:, 4:]) * 10
+                    torch.testing.assert_close(module(changed)[:, :, 3], output[:, :, 3], rtol=0, atol=0)
+                finally:
+                    a.remove()
+                    b.remove()
+
+    def test_calendar_forward_backward_future_availability_and_alignment(self):
+        for architecture in ("encoder_decoder", "joint"):
+            for future in (True, False):
+                model = self.make_model(architecture=architecture, future=future,
+                                        use_calendar_exog=True, freq="h", alpha=0.2,
+                                        channel_attn_type="local_summary", channel_fusion_mode="cross_attn")
+                x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                past = torch.randn(2, 16, 4, requires_grad=True)
+                marks = torch.randn(2, 12, 4, requires_grad=True)
+                result, auxiliary = model(x, exog, None, past, marks)
+                self.assertEqual(result.shape, (2, 8, 2))
+                self.assertEqual(model.temporal_encoder.c_in, 9)
+                (result.square().mean() + auxiliary).backward()
+                self.assertGreater(past.grad.abs().sum().item(), 0)
+                self.assertGreater(marks.grad[:, -8:].abs().sum().item(), 0)
+                self.assertEqual(marks.grad[:, :4].abs().sum().item(), 0)
+                self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None))
+                model.eval()
+                other = marks.detach().clone()
+                other[:, :4] += 100
+                with torch.no_grad():
+                    torch.testing.assert_close(model(x, exog, None, past, marks)[0],
+                                               model(x, exog, None, past, other)[0], rtol=0, atol=0)
+
+    def test_calendar_validation_and_checkpoint(self):
+        options = dict(architecture="encoder_decoder", use_calendar_exog=True, freq="d")
+        model, restored = self.make_model(**options).eval(), self.make_model(**options).eval()
+        self.assertEqual(model.calendar_channels, 3)
+        restored.load_state_dict(model.state_dict())
+        x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        past, future = torch.randn(2, 16, 3), torch.randn(2, 8, 3)
+        with torch.no_grad():
+            expected = model(x, exog, None, past, future)[0]
+            torch.testing.assert_close(expected, restored(x, exog, None, past, future)[0], rtol=0, atol=0)
+            torch.testing.assert_close(expected[:1], restored(x[:1], exog[:1], None, past[:1], future[:1])[0])
+        with self.assertRaisesRegex(ValueError, "time marks"):
+            model(x, exog, None)
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            Nmask2(seq_len=16, use_calendar_exog=1)
+        with self.assertRaisesRegex(ValueError, "local_summary"):
+            Nmask2(seq_len=16, architecture="joint", use_calendar_exog=True)
+
+    def test_calendar_only_without_regular_covariates(self):
+        for known_future in (True, False):
+            adapter = Nmask2(seq_len=16, horizon=3, patch_len=4, stride=4,
+                             d_model=8, d_ff=16, n_heads=2, e_layers=1, dropout=0.0,
+                             use_calendar_exog=True, freq="h", use_future_exog=known_future)
+            adapter.config.enc_in = adapter.config.series_dim = 1
+            adapter.config.criterion = torch.nn.L1Loss()
+            model = Nmask2Model(adapter.config)
+            output, auxiliary = model(torch.randn(2, 16, 1), None, None,
+                                      torch.randn(2, 16, 4), torch.randn(2, 3, 4))
+            self.assertEqual(output.shape, (2, 3, 1))
+            self.assertEqual(auxiliary, 0)
+            output.square().mean().backward()
+            self.assertTrue(torch.isfinite(output).all())
+
+    def test_calendar_sampling_frequency_and_rolling_timestamp_alignment(self):
+        import numpy as np
+        import pandas as pd
+        from ts_benchmark.baselines.utils import get_time_mark
+        for freq in ("10min", "2h", "h", "D"):
+            for columns in (1, 3):
+                index = pd.date_range("2024-01-31 22:00", periods=40, freq=freq, name="date")
+                frame = pd.DataFrame(np.zeros((40, columns)), index=index)
+                adapter = Nmask2(seq_len=16, horizon=8, use_calendar_exog=True)
+                tune = adapter.single_forecasting_hyper_param_tune if columns == 1 else adapter.multi_forecasting_hyper_param_tune
+                tune(frame)
+                self.assertEqual(pd.tseries.frequencies.to_offset(adapter.config.freq), pd.tseries.frequencies.to_offset(freq))
+                stamps = np.stack((index[:16].to_numpy(), index[3:19].to_numpy()))
+                actual = adapter._padding_time_stamp_mark(stamps, 8)
+                expected_stamps = np.stack((index[:24].to_numpy(), index[3:27].to_numpy()))
+                expected = get_time_mark(expected_stamps, 1, freq)
+                np.testing.assert_array_equal(actual, expected)
+                _, _, history_marks, future_marks = adapter._get_rolling_data(
+                    np.zeros((2, 16, columns)), None, actual, 0)
+                np.testing.assert_array_equal(history_marks, expected[:, :16])
+                np.testing.assert_array_equal(future_marks[:, -8:], expected[:, 16:24])
+
+    def test_calendar_patch_channel_order_and_no_window_normalization(self):
+        model = self.make_model(architecture="encoder_decoder", use_calendar_exog=True, freq="h").eval()
+        core = model.temporal_encoder
+        captured = []
+        handle = core.covariate_encoder.register_forward_pre_hook(
+            lambda m, args: captured.append(args[0].detach().clone()))
+        x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        # Distinct constants per sample/feature expose accidental flattening
+        # across channel/batch boundaries and unwanted instance normalization.
+        past = torch.arange(8, dtype=torch.float32).reshape(2, 1, 4).expand(2, 16, 4)
+        future = past[:, :8] + 10
+        try:
+            with torch.no_grad():
+                model(x, exog, None, past, future)
+        finally:
+            handle.remove()
+        actual = captured[0].reshape(2, 7, 8, 16)[:, -4:]
+        with torch.no_grad():
+            hist, _ = core.x_patch_embedding(past.transpose(1, 2))
+            fut, _ = core.x_patch_embedding(future.transpose(1, 2))
+        expected = torch.cat((hist, fut), dim=1).reshape(2, 4, 8, 16)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

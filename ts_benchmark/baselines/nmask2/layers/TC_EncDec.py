@@ -46,7 +46,7 @@ class TemporalCausalityEncoder(nn.Module):
                  channel_attn_mode="rope", channel_attn_type="local_summary",
                  channel_window=1, channel_summaries=4, local_time_rope=True,
                  temporal_attn_scope="target_only", architecture="encoder_decoder",
-                 covariate_layers=1, channel_fusion_mode="dot"
+                 covariate_layers=1, channel_fusion_mode="dot", calendar_channels=0
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -54,6 +54,10 @@ class TemporalCausalityEncoder(nn.Module):
         self.series_dim = series_dim
         # self.criterion = criterion
         self.c_in = enc_in
+        self.calendar_channels = calendar_channels
+        self.regular_covariates = enc_in - series_dim - calendar_channels
+        if calendar_channels and channel_attn_type != "local_summary":
+            raise ValueError("Calendar covariates require local_summary attention")
         self.pad_method = pad_method
         self.predict_method = predict_method
         self.use_future_exog = use_future_exog
@@ -109,7 +113,7 @@ class TemporalCausalityEncoder(nn.Module):
                 TargetDecoderLayer(
                     d_model, d_ff, n_heads, enc_in, series_dim, dropout, factor,
                     activation, use_rope, channel_attn_mode, channel_window,
-                    channel_summaries, local_time_rope, channel_fusion_mode,
+                    channel_summaries, local_time_rope, channel_fusion_mode, calendar_channels,
                 ) for _ in range(e_layers)
             ], d_model)
         else:
@@ -196,7 +200,7 @@ class TemporalCausalityEncoder(nn.Module):
         if not self.use_future_exog:
             self.exog_future = nn.Parameter(
                 # torch.randn(args.num_classes, bottle_dim // 1)
-                torch.randn(1, self.c_in - self.series_dim, future_patch_num, d_model)
+                torch.randn(1, self.regular_covariates, future_patch_num, d_model)
                 # torch.randn(args.num_classes, out_dim * self.c_in)
             )
             self.exog_head = nn.Sequential(
@@ -205,15 +209,24 @@ class TemporalCausalityEncoder(nn.Module):
             )
         
 
-    def forward(self, x, exog_future, use_exog=True):
+    def forward(self, x, exog_future, use_exog=True, input_mark=None, target_mark=None):
         exog_history = x[:, :, self.series_dim:]
         x_history = x[:, :, :self.series_dim]
 
         _, _, EXOG_D = exog_history.shape
         B, L, X_D = x_history.shape
+        if EXOG_D != self.regular_covariates:
+            raise ValueError("Unexpected number of regular covariates")
+        if self.calendar_channels:
+            if (input_mark is None or target_mark is None
+                    or input_mark.shape != (B, L, self.calendar_channels)
+                    or target_mark.ndim != 3 or target_mark.shape[0] != B
+                    or target_mark.shape[1] < self.pred_len
+                    or target_mark.shape[2] != self.calendar_channels):
+                raise ValueError("use_calendar_exog requires aligned historical and future time marks")
 
         # print(f"{exog_history.shape = }, {exog_future.shape = }")
-        if self.use_future_exog:
+        if self.use_future_exog and EXOG_D:
             exog_history = torch.cat([exog_history, exog_future], dim=-2)
         # print(f"{exog_history.shape = }")
 
@@ -237,7 +250,11 @@ class TemporalCausalityEncoder(nn.Module):
         # patch_x, x_vars = self.patch_embedding(x_history)
 
         # patch_exog, exog_vars = self.exog_patch_embedding(exog_history)
-        if self.use_future_exog:
+        if EXOG_D == 0:
+            # Calendar-only conditioning needs no ordinary covariate embedding.
+            patch_count = L // self.x_patch_embedding.patch_len + 1 + self.x_future.shape[-2]
+            patch_exog = x.new_empty(B, 0, patch_count, self.x_future.shape[-1])
+        elif self.use_future_exog:
             exog_future = exog_history[:,:,L:]
             exog_history, exog_vars = self.x_patch_embedding(exog_history[:,:,:L])
             exog_future, exog_vars = self.x_patch_embedding(exog_future)
@@ -257,6 +274,15 @@ class TemporalCausalityEncoder(nn.Module):
         x_future = self.x_future.expand(B, -1, -1, -1)
         patch_x = torch.cat([patch_x, x_future], dim=-2)
         patch_exog = patch_exog.view(B, EXOG_D, patch_exog.shape[-2], patch_exog.shape[-1])
+        if self.calendar_channels:
+            # Time marks already use fixed calendar scaling. Avoid per-window
+            # centering, which would erase constant weekday/month information.
+            calendar_history, _ = self.x_patch_embedding(input_mark.to(x).transpose(1, 2))
+            calendar_future, _ = self.x_patch_embedding(target_mark[:, -self.pred_len:].to(x).transpose(1, 2))
+            calendar = torch.cat((calendar_history, calendar_future), dim=1)
+            calendar = calendar.reshape(B, self.calendar_channels, calendar.shape[-2], calendar.shape[-1])
+            patch_exog = torch.cat((patch_exog, calendar), dim=1)
+            EXOG_D += self.calendar_channels
         # print(f"{patch_x.shape = }, {patch_exog.shape = }")
 
         patch_x = torch.cat([patch_x, patch_exog], dim=1)
@@ -301,7 +327,7 @@ class TemporalCausalityEncoder(nn.Module):
             enc_x_out, (B, -1, enc_x_out.shape[-2], enc_x_out.shape[-1])
         ) #.permute(0, 1, 3, 2)
         # print(f"{enc_x_out.shape = }")
-        exog_out = enc_x_out[:,X_D:,x_history_L:]
+        exog_out = enc_x_out[:,X_D:X_D + self.regular_covariates,x_history_L:]
         if self.predict_method == 'future_patch':
             enc_x_out = enc_x_out[:,:X_D,x_history_L:]
             # enc_x_out = enc_x_out[:,:,x_history_L:].permute(0, 3, 2, 1)
@@ -338,7 +364,7 @@ class TemporalCausalityEncoder(nn.Module):
 
         if not self.use_future_exog:
             exog_out = self.exog_head(exog_out)
-            exog_out = exog_out.view(B, EXOG_D, -1)
+            exog_out = exog_out.flatten(start_dim=2)
             exog_out = exog_out[:,:,:self.pred_len]
 
             exog_out = exog_out.permute(0, 2, 1)
@@ -398,6 +424,7 @@ class TemporalCausalityEncoder(nn.Module):
                         mode=self.channel_attn_mode, dropout=dropout, head_dim=channel_head_dim,
                         local_time_rope=self.local_time_rope,
                         channel_fusion_mode=self.channel_fusion_mode,
+                        calendar_channels=self.calendar_channels,
                     ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)

@@ -26,7 +26,7 @@ def validate_channel_fusion(mode):
 class LocalSummaryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_channels, target_channels,
                  window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None,
-                 local_time_rope=True, channel_fusion_mode="dot"):
+                 local_time_rope=True, channel_fusion_mode="dot", calendar_channels=0):
         super().__init__()
         validate_channel_attention("local_summary", window, summaries)
         if mode not in ("rope", "none", "embedding"):
@@ -35,6 +35,10 @@ class LocalSummaryAttention(nn.Module):
             raise ValueError("local_summary requires at least one target and one covariate")
         self.window, self.summaries = window, summaries
         self.n_channels, self.target_channels = n_channels, target_channels
+        if (isinstance(calendar_channels, bool) or not isinstance(calendar_channels, int)
+                or not 0 <= calendar_channels <= n_channels - target_channels):
+            raise ValueError("calendar_channels must fit within the covariate channels")
+        self.calendar_channels = calendar_channels
         self.n_heads = n_heads
         self.head_dim = head_dim or d_model // n_heads
         if mode == "rope" and self.head_dim % 2:
@@ -136,6 +140,13 @@ class LocalSummaryAttention(nn.Module):
             summary_k, summary_v = self._pool(k, count), self._pool(v, count)
             global_scores = torch.einsum("bshpd,behrd->bshepr", q, summary_k) / math.sqrt(d)
             scores = torch.cat([scores, global_scores], dim=-1)
+        if self.calendar_channels:
+            # Calendar channels are last. Permit only the center local slot;
+            # all neighboring slots and pooled summaries are invisible to them.
+            allowed = torch.ones(c - s, 1, scores.shape[-1], dtype=torch.bool, device=x.device)
+            allowed[-self.calendar_channels:] = False
+            allowed[-self.calendar_channels:, :, self.window // 2] = True
+            scores = scores.masked_fill(~allowed, float("-inf"))
         # Normalize within each variable first, then fuse variables dynamically.
         weights = self.dropout(torch.softmax(scores, dim=-1))
         context = torch.einsum("bshepw,behpwd->bshepd", weights[..., :self.window], local_v)
