@@ -8,13 +8,15 @@ covariate encoder followed by a target decoder. Original `nmask` is unchanged.
 1. Normalize and patch historical targets and historical/known future covariates.
    Retain the original shared patch embedding, target future placeholders and
    prediction heads to isolate the architecture change.
-2. Encode each covariate along time using `covariate_layers` attention/FFN blocks.
-   This encoder runs once per forward pass and never receives target states.
-3. Each of the `e_layers` target decoder blocks applies target temporal attention,
-   per-covariate local-summary cross-attention, variable fusion, and a target FFN.
-4. All decoder blocks read the same covariate memory. They do not update or
-   normalize it in place. Memory is not detached: prediction gradients train the
-   covariate encoder normally. Each block has its own cross-attention projections.
+2. Encode each covariate through `e_layers` temporal attention/FFN blocks and
+   retain the representation `M_i` produced at every depth. This encoder never
+   receives target states.
+3. Target block `i` consumes the previous target state `H_(i-1)` and `M_i`, then
+   applies target temporal attention, per-covariate local-summary cross-attention,
+   variable fusion, and a target FFN.
+4. Decoder blocks read but do not update their corresponding covariate memory.
+   Memory is not detached: prediction gradients train every covariate layer.
+   Each target block has its own cross-attention projections.
 5. Decode future target patches using the existing prediction head.
 
 Historical and future target patches both query memory. No true future target
@@ -25,7 +27,6 @@ values are used as input. At least one target and one covariate are required.
 ```json
 {
   "architecture": "encoder_decoder",
-  "covariate_layers": 1,
   "e_layers": 2,
   "channel_attn_type": "local_summary",
   "temporal_attn_scope": "target_only",
@@ -38,11 +39,14 @@ values are used as input. At least one target and one covariate are required.
 }
 ```
 
-`e_layers` controls target decoder depth; `covariate_layers` controls the separate
-covariate encoder depth (positive integer, default 1). New architecture defaults
-are W=1, R=4. `channel_attn_type=local_summary` and
+`e_layers` jointly controls covariate encoder and target decoder depth and must
+be a positive integer. New architecture defaults are W=1, R=4.
+`channel_attn_type=local_summary` and
 `temporal_attn_scope=target_only` are required for `encoder_decoder`; incompatible
 explicit values raise an error rather than silently changing the architecture.
+`covariate_layers` has been removed and passing it now raises an error. Existing
+encoder-decoder checkpoints created with a separate covariate depth must be
+retrained with the unified layer structure.
 
 Set `use_patch_mask_embedding=true` to add an availability embedding to every
 value patch. A shared `Linear(patch_len, d_model)` projects the binary mask and
@@ -112,13 +116,13 @@ calendar channels before the resulting covariate memory is exposed to the
 target decoder. Each covariate layer follows the target layer order: temporal
 self-attention, local-summary calendar attention, then its FFN. Calendar keys
 remain read-only and restricted to W=1/R=0; ordinary covariates are updated,
-while calendar channels are not. `covariate_layers` controls this decoder
-depth. This option defaults to false, requires `use_calendar_exog=true`, at
+while calendar channels are not. Its depth also equals `e_layers`. This option
+defaults to false, requires `use_calendar_exog=true`, at
 least one ordinary covariate, and `architecture=encoder_decoder`.
 Its channel-attention projection modules are automatically shared with the
-corresponding target decoder layer. Extra conditioning layers share with the
-final target layer. Temporal attention, FFNs, channel layouts, masks and
-variable embeddings remain stream-specific. No extra hyperparameter is needed.
+corresponding target decoder layer. Temporal attention, FFNs, channel layouts,
+masks and variable embeddings remain stream-specific. No extra hyperparameter
+is needed.
 
 Calendar timestamps remain known when `use_future_exog=false`; they are not
 replaced by future placeholders or included in auxiliary covariate prediction
@@ -178,8 +182,9 @@ bash scripts/train/nmask2.sh
 
 The first script contains 24 fixed configurations using channel RoPE. The second
 uses variable embeddings. Both now explicitly select the new architecture with
-W=1, R=4 and one covariate encoder layer. Dataset-specific decoder depths,
-learning rates, patch sizes and forecast horizons are preserved.
+W=1 and R=4. Each configuration uses its dataset-specific `e_layers` value for
+both covariate encoding and target decoding; learning rates, patch sizes and
+forecast horizons are preserved.
 
 The training search script uses variable embeddings and retains its existing
 25 combinations per enabled case and enabled/commented dataset selection.

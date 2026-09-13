@@ -140,7 +140,7 @@ class Nmask2Tests(unittest.TestCase):
             new_params = json.loads(after[after.index("--model-hyper-params") + 1])
             self.assertEqual(new_params.pop("channel_attn_mode"), "rope")
             self.assertTrue(new_params.pop("use_future_exog"))
-            for key, value in {"architecture": "encoder_decoder", "covariate_layers": 1,
+            for key, value in {"architecture": "encoder_decoder",
                                "channel_attn_type": "local_summary", "channel_window": 1,
                                "channel_summaries": 4, "temporal_attn_scope": "target_only"}.items():
                 self.assertEqual(new_params.pop(key), value)
@@ -355,44 +355,56 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         self.assertEqual(adapter.config.temporal_attn_scope, "target_only")
         self.assertEqual(adapter.config.channel_attn_type, "local_summary")
         self.assertEqual(adapter.config.channel_window, 1)
-        self.assertEqual(adapter.config.covariate_layers, 1)
+        self.assertFalse(hasattr(adapter.config, "covariate_layers"))
         self.assertTrue(adapter.config.calendar_temporal_attn)
         self.assertFalse(adapter.config.covariate_calendar_attn)
         self.assertFalse(adapter.config.use_patch_mask_embedding)
-        for options in ({"architecture": "bad"}, {"covariate_layers": 0},
-                        {"covariate_layers": True}, {"covariate_layers": 1.5},
+        for options in ({"architecture": "bad"}, {"covariate_layers": 1},
+                        {"e_layers": 0}, {"e_layers": True}, {"e_layers": 1.5},
                         {"channel_attn_type": "full"}, {"temporal_attn_scope": "all"}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Nmask2(seq_len=16, **options)
 
-    def test_read_only_memory_reused_and_no_target_to_covariate_path(self):
+    def test_layerwise_read_only_memories_and_no_target_to_covariate_path(self):
         model = self.new_model(mode="embedding").eval()
         core = model.temporal_encoder
         self.assertFalse(hasattr(core, "encoder_x"))
-        encoded, inputs, handles = [], [], []
-        handles.append(core.covariate_encoder.register_forward_hook(
-            lambda module, args, result: encoded.append(result[0])))
+        encoded, inputs, target_outputs, handles = [], [], [], []
+        for layer in core.covariate_encoder.attn_layers:
+            handles.append(layer.register_forward_hook(
+                lambda module, args, result: encoded.append(result[0])))
         for layer in core.target_decoder.layers:
             handles.append(layer.register_forward_pre_hook(
-                lambda module, args: inputs.append((args[0].shape, args[1], args[1].detach().clone()))))
+                lambda module, args: inputs.append((args[0], args[1], args[1].detach().clone()))))
+            handles.append(layer.register_forward_hook(
+                lambda module, args, result: target_outputs.append(result)))
         x, future = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
         try:
             prediction, _ = model(x, future, None)
-            self.assertEqual(len(encoded), 1)
+            self.assertEqual(len(encoded), 2)
             self.assertEqual(len(inputs), 2)
-            for shape, memory, snapshot in inputs:
-                self.assertEqual(shape[:2], (2, 2))
+            for index, (target_state, memory, snapshot) in enumerate(inputs):
+                self.assertEqual(target_state.shape[:2], (2, 2))
                 self.assertEqual(memory.shape[:2], (2, 3))
-                self.assertEqual(memory.data_ptr(), encoded[0].data_ptr())
+                torch.testing.assert_close(
+                    memory,
+                    core.covariate_encoder.norm(encoded[index]).reshape_as(memory),
+                    rtol=0, atol=0,
+                )
                 torch.testing.assert_close(memory, snapshot, rtol=0, atol=0)
-            encoded[0].retain_grad()
+                memory.retain_grad()
+            self.assertNotEqual(inputs[0][1].data_ptr(), inputs[1][1].data_ptr())
+            self.assertEqual(inputs[1][1].shape, inputs[0][1].shape)
+            self.assertEqual(inputs[1][0].data_ptr(), target_outputs[0].data_ptr())
             prediction.square().mean().backward()
-            self.assertGreater(encoded[0].grad.abs().sum().item(), 0)
+            for _, memory, _ in inputs:
+                self.assertGreater(memory.grad.abs().sum().item(), 0)
             changed = x.clone()
             changed[:, :, :2] = torch.randn_like(changed[:, :, :2]) * 3
             with torch.no_grad():
                 model(changed, future, None)
-            torch.testing.assert_close(encoded[0], encoded[1], rtol=0, atol=0)
+            for index in range(2):
+                torch.testing.assert_close(encoded[index], encoded[index + 2], rtol=0, atol=0)
         finally:
             for handle in handles:
                 handle.remove()
@@ -402,7 +414,7 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
             for future in (False, True):
                 with self.subTest(mode=mode, future=future):
                     model = self.new_model(mode=mode, future=future, alpha=0.2,
-                                           covariate_layers=2, d_model=12, heads=4)
+                                           d_model=12, heads=4)
                     x = torch.randn(2, 16, 5)
                     exog = torch.randn(2, 8, 3, requires_grad=True)
                     output, auxiliary = model(x, exog, None)
@@ -765,12 +777,14 @@ class Nmask2CalendarTests(unittest.TestCase):
             ).eval()
             core = model.temporal_encoder
             handles = [
-                core.covariate_encoder.register_forward_pre_hook(
+                core.covariate_encoder.attn_layers[0].register_forward_pre_hook(
                     lambda module, args, flag=enabled:
                         encoder_inputs.__setitem__(flag, args[0].detach().clone())),
                 core.target_decoder.register_forward_pre_hook(
                     lambda module, args, flag=enabled:
-                        decoder_memories.__setitem__(flag, args[1].detach().clone())),
+                        decoder_memories.__setitem__(
+                            flag, [item.detach().clone() for item in args[1]]
+                        )),
             ]
             try:
                 with torch.no_grad():
@@ -785,7 +799,7 @@ class Nmask2CalendarTests(unittest.TestCase):
         # Disabled: only the 3 ordinary covariates enter it.
         self.assertEqual(encoder_inputs[False].shape[0], 2 * 3)
 
-        bypassed_calendar = decoder_memories[False][:, -4:]
+        bypassed_calendar = decoder_memories[False][0][:, -4:]
         disabled_model = self.make_model(
             architecture="encoder_decoder", use_calendar_exog=True, freq="h",
             calendar_temporal_attn=False,
@@ -816,7 +830,7 @@ class Nmask2CalendarTests(unittest.TestCase):
                     mode="embedding", architecture="encoder_decoder",
                     use_calendar_exog=True, freq="h",
                     covariate_calendar_attn=True,
-                    channel_fusion_mode=fusion, e_layers=2, covariate_layers=3,
+                    channel_fusion_mode=fusion, e_layers=2,
                 )
                 core = model.temporal_encoder
                 common = (
@@ -828,7 +842,7 @@ class Nmask2CalendarTests(unittest.TestCase):
                     "cross_attn": ("gate_key", "gate_value"),
                 }[fusion]
                 for index, layer in enumerate(core.covariate_calendar_decoder.layers):
-                    source = core.target_decoder.layers[min(index, 1)].cross_attention
+                    source = core.target_decoder.layers[index].cross_attention
                     for name in common + optional:
                         self.assertIs(getattr(layer.cross_attention, name),
                                       getattr(source, name))
@@ -856,13 +870,15 @@ class Nmask2CalendarTests(unittest.TestCase):
                          core.target_decoder.layers[0].linear1)
         inputs, decoder_memory = [], []
         handles = [
-            conditioner.register_forward_pre_hook(
+            conditioner.layers[0].register_forward_pre_hook(
                 lambda module, args: inputs.append(
                     (args[0].detach().clone(), args[1].detach().clone())
                 )
             ),
             core.target_decoder.register_forward_pre_hook(
-                lambda module, args: decoder_memory.append(args[1].detach().clone())
+                lambda module, args: decoder_memory.append(
+                    [item.detach().clone() for item in args[1]]
+                )
             ),
         ]
         x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
@@ -877,10 +893,11 @@ class Nmask2CalendarTests(unittest.TestCase):
         regular_input, calendar_input = inputs[0]
         self.assertEqual(regular_input.shape[:2], (2, 3))
         self.assertEqual(calendar_input.shape[:2], (2, 4))
-        torch.testing.assert_close(
-            decoder_memory[0][:, -4:], calendar_input, rtol=0, atol=0,
-        )
-        self.assertFalse(torch.equal(decoder_memory[0][:, :3], regular_input))
+        for layer_memory in decoder_memory[0]:
+            torch.testing.assert_close(
+                layer_memory[:, -4:], calendar_input, rtol=0, atol=0,
+            )
+        self.assertFalse(torch.equal(decoder_memory[0][0][:, :3], regular_input))
 
         prediction.square().mean().backward()
         self.assertGreater(past.grad.abs().sum().item(), 0)
@@ -978,7 +995,7 @@ class Nmask2CalendarTests(unittest.TestCase):
         model = self.make_model(architecture="encoder_decoder", use_calendar_exog=True, freq="h").eval()
         core = model.temporal_encoder
         captured = []
-        handle = core.covariate_encoder.register_forward_pre_hook(
+        handle = core.covariate_encoder.attn_layers[0].register_forward_pre_hook(
             lambda m, args: captured.append(args[0].detach().clone()))
         x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
         # Distinct constants per sample/feature expose accidental flattening

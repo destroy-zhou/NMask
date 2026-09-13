@@ -15,10 +15,21 @@ def time_attention(d_model, n_heads, dropout, factor, use_rope):
     )
 
 
+class CovariateEncoder(Encoder):
+    def forward_intermediates(self, x, channels):
+        """Return the normalized representation produced at every depth."""
+        outputs, attentions = [], []
+        for layer in self.attn_layers:
+            x, attention = layer(x, channels)
+            outputs.append(self.norm(x) if self.norm is not None else x)
+            attentions.append(attention)
+        return outputs, attentions
+
+
 def build_covariate_encoder(d_model, d_ff, n_heads, layers, dropout,
                             factor, activation, use_rope):
     # Each covariate is encoded along time, independently of the targets.
-    return Encoder([
+    return CovariateEncoder([
         EncoderLayer(time_attention(d_model, n_heads, dropout, factor, use_rope),
                      None, d_model, d_ff, dropout, activation)
         for _ in range(layers)
@@ -68,8 +79,23 @@ class TargetDecoder(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.norm = nn.LayerNorm(d_model)
 
+    def _memories(self, memory):
+        if isinstance(memory, (list, tuple)):
+            if len(memory) != len(self.layers):
+                raise ValueError("One memory tensor is required for each decoder layer")
+            return memory
+        return [memory] * len(self.layers)
+
     def forward(self, targets, memory):
-        # Reuse the same tensor without detach: target loss trains its encoder.
-        for layer in self.layers:
-            targets = layer(targets, memory)
+        # H_i consumes H_(i-1) and the covariate representation M_i.
+        for layer, layer_memory in zip(self.layers, self._memories(memory)):
+            targets = layer(targets, layer_memory)
         return self.norm(targets)
+
+    def forward_intermediates(self, targets, memory):
+        """Return a read-only memory snapshot after every decoder layer."""
+        outputs = []
+        for layer, layer_memory in zip(self.layers, self._memories(memory)):
+            targets = layer(targets, layer_memory)
+            outputs.append(self.norm(targets))
+        return outputs

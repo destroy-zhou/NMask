@@ -15,6 +15,7 @@ MODEL_HYPER_PARAMS = {
     "d_model": 512,
     "d_ff": 2048,
     "n_heads": 8,
+    "e_layers": 2,
     "factor": 1,
     "patch_len": 16,
     "stride": 8,
@@ -42,7 +43,6 @@ MODEL_HYPER_PARAMS = {
     "infer_use_future": False,
     "channel_attn_mode": "rope",  # rope | none | embedding
     "architecture": "encoder_decoder",  # encoder_decoder | joint (legacy)
-    "covariate_layers": 1,
     "channel_attn_type": "local_summary",  # full is supported by joint only
     "channel_window": 1,
     "channel_summaries": 4,
@@ -70,6 +70,8 @@ class Nmask2(DeepForecastingModelBase):
     """
 
     def __init__(self, **kwargs):
+        if "covariate_layers" in kwargs:
+            raise ValueError("covariate_layers was removed; use e_layers for both streams")
         if kwargs.get("architecture") == "joint":
             # Reproduce the old defaults when explicitly selecting the baseline.
             kwargs.setdefault("channel_attn_type", "full")
@@ -101,9 +103,9 @@ class Nmask2(DeepForecastingModelBase):
         if self.config.architecture == "encoder_decoder":
             if self.config.channel_attn_type != "local_summary" or self.config.temporal_attn_scope != "target_only":
                 raise ValueError("encoder_decoder requires channel_attn_type=local_summary and temporal_attn_scope=target_only; use architecture=joint for the old model")
-            depth = self.config.covariate_layers
-            if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
-                raise ValueError("covariate_layers must be a positive integer")
+        depth = self.config.e_layers
+        if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+            raise ValueError("e_layers must be a positive integer")
         if self.config.temporal_attn_scope not in ("all", "target_only"):
             raise ValueError("temporal_attn_scope must be all or target_only")
         validate_channel_attention(self.config.channel_attn_type,
