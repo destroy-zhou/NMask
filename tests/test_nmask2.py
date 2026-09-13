@@ -359,11 +359,16 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         self.assertTrue(adapter.config.calendar_temporal_attn)
         self.assertFalse(adapter.config.covariate_calendar_attn)
         self.assertFalse(adapter.config.use_patch_mask_embedding)
+        self.assertFalse(adapter.config.covariate_self_channel_attn)
         for options in ({"architecture": "bad"}, {"covariate_layers": 1},
                         {"e_layers": 0}, {"e_layers": True}, {"e_layers": 1.5},
+                        {"covariate_self_channel_attn": 1},
                         {"channel_attn_type": "full"}, {"temporal_attn_scope": "all"}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Nmask2(seq_len=16, **options)
+        with self.assertRaisesRegex(ValueError, "encoder_decoder"):
+            Nmask2(seq_len=16, architecture="joint",
+                   covariate_self_channel_attn=True)
 
     def test_layerwise_read_only_memories_and_no_target_to_covariate_path(self):
         model = self.new_model(mode="embedding").eval()
@@ -408,6 +413,82 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
         finally:
             for handle in handles:
                 handle.remove()
+
+    def test_covariate_channel_attention_precedes_ffn_and_preserves_time_memories(self):
+        model = self.new_model(
+            mode="embedding", e_layers=3,
+            covariate_self_channel_attn=True,
+        ).train()
+        core = model.temporal_encoder
+        self.assertEqual(len(core.covariate_encoder.channel_layers), 3)
+        time_inputs, time_outputs = [], []
+        channel_inputs, channel_outputs = [], []
+        ffn_inputs, ffn_outputs, decoder_memories = [], [], []
+        handles = []
+        for layer in core.covariate_encoder.attn_layers:
+            handles.append(layer.register_forward_pre_hook(
+                lambda module, args: time_inputs.append(args[0])))
+            handles.append(layer.register_forward_hook(
+                lambda module, args, result: time_outputs.append(result[0])))
+            handles.append(layer.conv1.register_forward_pre_hook(
+                lambda module, args: ffn_inputs.append(args[0])))
+            handles.append(layer.norm2.register_forward_hook(
+                lambda module, args, result: ffn_outputs.append(result)))
+        for layer in core.covariate_encoder.channel_layers:
+            handles.append(layer.register_forward_pre_hook(
+                lambda module, args: channel_inputs.append(args[0])))
+            handles.append(layer.register_forward_hook(
+                lambda module, args, result: channel_outputs.append(result)))
+        handles.append(core.target_decoder.register_forward_pre_hook(
+            lambda module, args: decoder_memories.extend(args[1])))
+        try:
+            prediction, _ = model(
+                torch.randn(2, 16, 5), torch.randn(2, 8, 3), None,
+            )
+            self.assertEqual(len(decoder_memories), 3)
+            for index, memory in enumerate(decoder_memories):
+                torch.testing.assert_close(
+                    memory,
+                    core.covariate_encoder.norm(time_outputs[index]).reshape_as(memory),
+                    rtol=0, atol=0,
+                )
+            for index in range(3):
+                self.assertEqual(channel_inputs[index].data_ptr(),
+                                 time_outputs[index].data_ptr())
+                self.assertEqual(ffn_inputs[index].data_ptr(),
+                                 channel_outputs[index].data_ptr())
+            for index in range(2):
+                self.assertEqual(time_inputs[index + 1].data_ptr(),
+                                 ffn_outputs[index].data_ptr())
+            prediction.square().mean().backward()
+            for layer in core.covariate_encoder.channel_layers[:-1]:
+                self.assertGreater(
+                    layer.attention.value_projection.weight.grad.abs().sum().item(), 0,
+                )
+                self.assertGreater(layer.channel_embedding.grad.abs().sum().item(), 0)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    def test_auxiliary_covariate_loss_trains_final_channel_attention_and_ffn(self):
+        model = self.new_model(
+            mode="embedding", future=False, alpha=0.2, e_layers=3,
+            covariate_self_channel_attn=True,
+        ).train()
+        prediction, auxiliary = model(
+            torch.randn(2, 16, 5), torch.randn(2, 8, 3), None,
+        )
+        self.assertGreater(auxiliary.item(), 0)
+        (prediction.square().mean() + auxiliary).backward()
+        core = model.temporal_encoder
+        final_channel = core.covariate_encoder.channel_layers[-1]
+        self.assertGreater(
+            final_channel.attention.value_projection.weight.grad.abs().sum().item(), 0,
+        )
+        self.assertGreater(final_channel.channel_embedding.grad.abs().sum().item(), 0)
+        final_ffn = core.covariate_encoder.attn_layers[-1]
+        self.assertGreater(final_ffn.conv1.weight.grad.abs().sum().item(), 0)
+        self.assertGreater(final_ffn.conv2.weight.grad.abs().sum().item(), 0)
 
     def test_gradients_all_modes_with_and_without_known_future(self):
         for mode in ("rope", "none", "embedding"):
@@ -637,6 +718,40 @@ class Nmask2CalendarTests(unittest.TestCase):
                 finally:
                     a.remove()
                     b.remove()
+
+    def test_covariate_self_channel_attention_supports_calendar_paths(self):
+        x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+        past, future = torch.randn(2, 16, 4), torch.randn(2, 8, 4)
+        for calendar_temporal in (False, True):
+            for calendar_cross in (False, True):
+                with self.subTest(
+                    calendar_temporal=calendar_temporal,
+                    calendar_cross=calendar_cross,
+                ):
+                    model = self.make_model(
+                        mode="embedding", architecture="encoder_decoder",
+                        use_calendar_exog=True, freq="h", e_layers=3,
+                        calendar_temporal_attn=calendar_temporal,
+                        covariate_calendar_attn=calendar_cross,
+                        covariate_self_channel_attn=True,
+                    ).train()
+                    output, _ = model(x, exog, None, past, future)
+                    self.assertEqual(output.shape, (2, 8, 2))
+                    output.square().mean().backward()
+                    core = model.temporal_encoder
+                    channel_groups = []
+                    if not (calendar_cross and not calendar_temporal):
+                        channel_groups.append(core.covariate_encoder.channel_layers)
+                    if calendar_cross:
+                        channel_groups.append(
+                            core.covariate_calendar_decoder.channel_layers
+                        )
+                    for group in channel_groups:
+                        self.assertEqual(len(group), 3)
+                        for layer in group[:-1]:
+                            grad = layer.attention.value_projection.weight.grad
+                            self.assertIsNotNone(grad)
+                            self.assertGreater(grad.abs().sum().item(), 0)
 
     def test_calendar_forward_backward_future_availability_and_alignment(self):
         for architecture in ("encoder_decoder", "joint"):

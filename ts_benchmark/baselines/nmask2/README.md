@@ -8,8 +8,9 @@ covariate encoder followed by a target decoder. Original `nmask` is unchanged.
 1. Normalize and patch historical targets and historical/known future covariates.
    Retain the original shared patch embedding, target future placeholders and
    prediction heads to isolate the architecture change.
-2. Encode each covariate through `e_layers` temporal attention/FFN blocks and
-   retain the representation `M_i` produced at every depth. This encoder never
+2. At every covariate depth, run temporal attention and retain its normalized
+   output as `M_i` before channel attention and the FFN. Channel attention and
+   the FFN form the transition into the next temporal layer. This encoder never
    receives target states.
 3. Target block `i` consumes the previous target state `H_(i-1)` and `M_i`, then
    applies target temporal attention, per-covariate local-summary cross-attention,
@@ -34,6 +35,7 @@ values are used as input. At least one target and one covariate are required.
   "channel_summaries": 4,
   "local_time_rope": true,
   "channel_attn_mode": "rope",
+  "covariate_self_channel_attn": false,
   "use_patch_mask_embedding": false,
   "use_future_exog": true
 }
@@ -47,6 +49,21 @@ explicit values raise an error rather than silently changing the architecture.
 `covariate_layers` has been removed and passing it now raises an error. Existing
 encoder-decoder checkpoints created with a separate covariate depth must be
 retrained with the unified layer structure.
+
+Set `covariate_self_channel_attn=true` to mix external variables inside each
+patch between consecutive covariate time-attention layers. At depth `i`, the
+model first computes and saves `M_i` from time attention for Target Layer `i`,
+then applies standard multi-head self-attention across covariates followed by
+the layer FFN. That post-FFN state is the input to covariate time-attention
+layer `i+1`. At the final depth, the post-FFN state is sent to the existing
+covariate auxiliary prediction head instead. The auxiliary loss is active when
+`use_future_exog=false` and future covariates are supplied as labels; with
+known future covariates (`use_future_exog=true`), that loss remains disabled to
+avoid reconstructing values already present in the input. Consequently there are
+`e_layers` channel-attention and FFN blocks. The channel blocks inherit
+`channel_attn_mode`: channel RoPE, no identity encoding, or learned variable
+embeddings. Neither channel attention nor the FFN overwrites the saved
+per-depth memories.
 
 Set `use_patch_mask_embedding=true` to add an availability embedding to every
 value patch. A shared `Linear(patch_len, d_model)` projects the binary mask and

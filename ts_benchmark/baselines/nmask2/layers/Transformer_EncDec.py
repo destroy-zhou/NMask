@@ -54,7 +54,8 @@ class EncoderLayer(nn.Module):
         # self.attn_cw = nn.Parameter(torch.tensor([1.0, 1.0]))
         # self.alpha = nn.Parameter(torch.tensor(1.0))
 
-    def forward(self, x, c, exog_attn=None, attn_alpha=0.5, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, c, exog_attn=None, attn_alpha=0.5, attn_mask=None,
+                tau=None, delta=None, stop_after_time=False):
         _, l, d = x.shape
         temporal_input = x
         if self.temporal_attn_scope == "target_only":
@@ -77,6 +78,8 @@ class EncoderLayer(nn.Module):
             x = x + self.dropout(new_x)
         # y = x = self.norm1(x)
         x = self.norm1(x)
+        if stop_after_time:
+            return x, attn
 
         if self.local_channel_attention is not None:
             patches = x.reshape(-1, c, l, d)
@@ -136,10 +139,14 @@ class EncoderLayer(nn.Module):
         # x = x + self.dropout(new_x)
         # y = x = self.norm1(x)
 
+        return self.feed_forward(x, y), attn
+
+    def feed_forward(self, x, source=None):
+        """Apply the layer FFN to a state that has completed attention."""
+        y = x if source is None else source
         y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
         y = self.dropout(self.conv2(y).transpose(-1, 1))
-
-        return self.norm2(x + y), attn
+        return self.norm2(x + y)
 
 
 class Encoder(nn.Module):
