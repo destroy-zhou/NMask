@@ -45,13 +45,13 @@ MODEL_HYPER_PARAMS = {
     "architecture": "encoder_decoder",  # encoder_decoder | joint (legacy)
     "channel_attn_type": "local_summary",  # full is supported by joint only
     "channel_window": 1,
-    "channel_summaries": 4,
+    "channel_summaries": 2,
     "use_calendar_exog": False,  # append time marks as known future covariates
-    "calendar_temporal_attn": True,  # False keeps calendar patches position-local
+    "calendar_temporal_attn": False,  # False keeps calendar patches position-local
     "covariate_calendar_attn": False,  # let ordinary covariates read calendar patches
     "use_patch_mask_embedding": False,  # add a projected observed/missing mask to each patch
-    "covariate_self_channel_attn": False,  # mix exogenous channels between temporal layers
-    "channel_fusion_mode": "dot",  # dot | qk | mlp | cross_attn; local_summary fusion
+    "covariate_self_channel_attn": False,  # mix exogenous channels after temporal attention
+    "channel_fusion_mode": "cross_attn",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
 

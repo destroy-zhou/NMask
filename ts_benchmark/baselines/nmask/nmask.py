@@ -28,7 +28,7 @@ MODEL_HYPER_PARAMS = {
     # "beta": 0.1,
     'pad_method': 'learn',
     'predict_method': 'future_patch',
-    "use_future_exog": False,   # whether to use future exogenous variables
+    "use_future_exog": True,   # whether to use future exogenous variables
     "use_c_exog": True,
     "use_t_exog": True,
     "use_c": True,
