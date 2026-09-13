@@ -15,87 +15,6 @@ from ts_benchmark.models.model_loader import get_models
 
 
 class Nmask2Tests(unittest.TestCase):
-    def test_covariate_feedback_matches_append_attention_discard(self):
-        from ts_benchmark.baselines.nmask2.layers.CovariateDecoder import CovariateChannelAttention
-        for mode in ("none", "rope", "embedding"):
-            with self.subTest(mode=mode):
-                layer = CovariateChannelAttention(16, 2, 3, 0.0, 1, mode,
-                                                   target_channels=2)
-                cov = torch.randn(6, 5, 16, requires_grad=True)
-                target = torch.randn(2, 2, 5, 16, requires_grad=True)
-                original = target.detach().clone()
-                combined = torch.cat((cov.reshape(2, 3, 5, 16), target), dim=1)
-                # Independent reference: explicitly form channel tokens, run
-                # the existing attention, and slice only after residual/norm.
-                tokens = combined.permute(0, 2, 1, 3).reshape(10, 5, 16)
-                qk = tokens if layer.channel_embedding is None else tokens + layer.channel_embedding
-                update, _ = layer.attention(qk, qk, tokens, attn_mask=None)
-                expected = layer.norm(tokens + update).reshape(2, 5, 5, 16)
-                expected = expected.permute(0, 2, 1, 3)[:, :3]
-                actual = layer(cov, 3, target_memory=target)
-                torch.testing.assert_close(actual.reshape_as(expected), expected, rtol=0, atol=0)
-                torch.testing.assert_close(target, original, rtol=0, atol=0)
-                (actual * torch.randn_like(actual)).sum().backward()
-                self.assertGreater(target.grad.abs().sum().item(), 0)
-
-    def test_covariate_feedback_uses_same_depth_target_time_states(self):
-        model = self.make_model(mode="embedding", architecture="encoder_decoder",
-                                covariate_self_channel_attn=True, e_layers=3)
-        core = model.temporal_encoder
-        time_states, appended, handles = [], [], []
-        for layer in core.target_decoder.layers:
-            handles.append(layer.norm1.register_forward_hook(
-                lambda module, args, output: time_states.append(output)))
-        for layer in core.covariate_encoder.channel_layers:
-            handles.append(layer.register_forward_pre_hook(
-                lambda module, args, kwargs: appended.append(kwargs["target_memory"]),
-                with_kwargs=True))
-        try:
-            model(torch.randn(2, 16, 5), torch.randn(2, 8, 3), None)
-            self.assertEqual(len(appended), 3)
-            for time, target in zip(time_states, appended):
-                self.assertEqual(time.data_ptr(), target.data_ptr())
-                torch.testing.assert_close(time.reshape_as(target), target, rtol=0, atol=0)
-        finally:
-            for handle in handles:
-                handle.remove()
-
-    def test_covariate_feedback_affects_next_memory_only(self):
-        torch.manual_seed(71)
-        for depth in (1, 2):
-            with self.subTest(depth=depth):
-                model = self.make_model(mode="embedding", architecture="encoder_decoder",
-                    covariate_self_channel_attn=True, e_layers=depth).eval()
-                core = model.temporal_encoder
-                x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
-                memories, handles = [], []
-                for layer in core.target_decoder.layers:
-                    handles.append(layer.cross_attention.register_forward_pre_hook(
-                        lambda module, args: memories.append(args[1].detach().clone())))
-                replacement = None
-                try:
-                    with torch.no_grad():
-                        reference, _ = model(x, exog, None)
-                    original_memories = list(memories)
-                    memories.clear()
-                    def replace_appended_targets(module, args, kwargs):
-                        return args, dict(kwargs, target_memory=torch.zeros_like(kwargs["target_memory"]))
-                    replacement = core.covariate_encoder.channel_layers[0].register_forward_pre_hook(
-                        replace_appended_targets, with_kwargs=True)
-                    with torch.no_grad():
-                        changed, _ = model(x, exog, None)
-                    torch.testing.assert_close(memories[0], original_memories[0], rtol=0, atol=0)
-                    if depth == 1:
-                        torch.testing.assert_close(reference, changed, rtol=0, atol=0)
-                    else:
-                        self.assertGreater((memories[1] - original_memories[1]).abs().max().item(), 1e-6)
-                        self.assertGreater((reference - changed).abs().max().item(), 1e-6)
-                finally:
-                    if replacement is not None:
-                        replacement.remove()
-                    for handle in handles:
-                        handle.remove()
-
     def test_shared_temporal_attention_validation(self):
         self.assertFalse(Nmask2(seq_len=16).config.share_temporal_attn)
         for value in (1, "true", None):
@@ -622,9 +541,8 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
                 lambda module, args: channel_inputs.append(args[0])))
             handles.append(layer.register_forward_hook(
                 lambda module, args, result: channel_outputs.append(result)))
-        for layer in core.target_decoder.layers:
-            handles.append(layer.cross_attention.register_forward_pre_hook(
-                lambda module, args: decoder_memories.append(args[1])))
+        handles.append(core.target_decoder.register_forward_pre_hook(
+            lambda module, args: decoder_memories.extend(args[1])))
         try:
             prediction, _ = model(
                 torch.randn(2, 16, 5), torch.randn(2, 8, 3), None,
@@ -642,8 +560,8 @@ class Nmask2EncoderDecoderTests(unittest.TestCase):
                 self.assertEqual(ffn_inputs[index].data_ptr(),
                                  channel_outputs[index].data_ptr())
             for index in range(2):
-                torch.testing.assert_close(time_inputs[index + 1],
-                                           ffn_outputs[index], rtol=0, atol=0)
+                self.assertEqual(time_inputs[index + 1].data_ptr(),
+                                 ffn_outputs[index].data_ptr())
             prediction.square().mean().backward()
             for layer in core.covariate_encoder.channel_layers[:-1]:
                 self.assertGreater(

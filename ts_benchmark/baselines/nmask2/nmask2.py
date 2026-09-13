@@ -50,7 +50,7 @@ MODEL_HYPER_PARAMS = {
     "calendar_temporal_attn": False,  # False keeps calendar patches position-local
     "covariate_calendar_attn": False,  # let ordinary covariates read calendar patches
     "use_patch_mask_embedding": False,  # add a projected observed/missing mask to each patch
-    "covariate_self_channel_attn": False,  # channel attention on [covariates; target time states], retain covariates
+    "covariate_self_channel_attn": False,  # mix exogenous channels after temporal attention
     "share_temporal_attn": False,  # tie target/covariate time attention at matching depths
     "channel_fusion_mode": "cross_attn",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only

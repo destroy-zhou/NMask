@@ -11,7 +11,7 @@ covariate encoder followed by a target decoder. Original `nmask` is unchanged.
 2. At every covariate depth, run temporal attention and retain its normalized
    output as `M_i` before channel attention and the FFN. Channel attention and
    the FFN form the transition into the next temporal layer. This encoder never
-   receives target states unless `covariate_self_channel_attn=true` (see below).
+   receives target states.
 3. Target block `i` consumes the previous target state `H_(i-1)` and `M_i`, then
    applies target temporal attention, per-covariate local-summary cross-attention,
    variable fusion, and a target FFN.
@@ -63,13 +63,8 @@ retrained with the unified layer structure.
 Set `covariate_self_channel_attn=true` to mix external variables inside each
 patch between consecutive covariate time-attention layers. At depth `i`, the
 model first computes and saves `M_i` from time attention for Target Layer `i`,
-then concatenates the same-depth post-time-attention target states AFTER the
-covariates along the channel axis. The existing channel self-attention runs on
-`[covariates; targets]`; only covariate outputs are retained, and appended target
-outputs are discarded. Target inputs remain differentiable. The target branch
-continues from its own time state and reads the original pre-channel `M_i`.
-This requires advancing both streams layer by layer when the switch is enabled.
-The retained covariate outputs pass through the layer FFN. That post-FFN state is the input to covariate time-attention
+then applies standard multi-head self-attention across covariates followed by
+the layer FFN. That post-FFN state is the input to covariate time-attention
 layer `i+1`. At the final depth, the post-FFN state is sent to the existing
 covariate auxiliary prediction head instead. The auxiliary loss is active when
 `use_future_exog=false` and future covariates are supplied as labels; with
@@ -79,14 +74,6 @@ avoid reconstructing values already present in the input. Consequently there are
 `channel_attn_mode`: channel RoPE, no identity encoding, or learned variable
 embeddings. Neither channel attention nor the FFN overwrites the saved
 per-depth memories.
-
-The feedback affects the target forecast starting at the next depth. With one
-layer and known future covariates, the final covariate channel/FFN transition
-does not affect the target forecast. In embedding mode, appended targets have
-their own identity rows; previous checkpoints trained with this switch enabled
-need retraining because that embedding table has grown. Calendar channels that
-skip temporal attention remain unchanged; active covariate/calendar channel
-blocks use the same append-and-discard rule.
 
 Set `use_patch_mask_embedding=true` to add an availability embedding to every
 value patch. A shared `Linear(patch_len, d_model)` projects the binary mask and

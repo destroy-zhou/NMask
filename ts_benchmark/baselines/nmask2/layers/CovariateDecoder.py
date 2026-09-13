@@ -19,18 +19,16 @@ def time_attention(d_model, n_heads, dropout, factor, use_rope):
 class CovariateChannelAttention(nn.Module):
     """Mix covariates within each patch after temporal attention."""
 
-    def __init__(self, d_model, n_heads, total_channels, dropout, factor, mode,
-                 target_channels=0):
+    def __init__(self, d_model, n_heads, total_channels, dropout, factor, mode):
         super().__init__()
         self.total_channels = total_channels
-        self.target_channels = target_channels
         self.attention = AttentionLayer(
             FullAttention(False, factor, attention_dropout=dropout,
                           output_attention=False),
             d_model, n_heads, use_rope=mode == "rope",
         )
         self.channel_embedding = (
-            nn.Parameter(torch.empty(1, total_channels + target_channels, d_model))
+            nn.Parameter(torch.empty(1, total_channels, d_model))
             if mode == "embedding" else None
         )
         if self.channel_embedding is not None:
@@ -38,28 +36,10 @@ class CovariateChannelAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, channels, channel_indices=None, target_memory=None):
+    def forward(self, x, channels, channel_indices=None):
         if channels <= 0 or x.shape[0] % channels:
             raise ValueError("Covariate channel layout is invalid")
         batch, patches, d_model = x.shape[0] // channels, x.shape[1], x.shape[2]
-        if target_memory is not None:
-            if target_memory.shape != (batch, self.target_channels, patches, d_model):
-                raise ValueError("Target time states must align with covariate patches")
-            if channel_indices is None:
-                channel_indices = torch.arange(channels, device=x.device)
-            else:
-                channel_indices = torch.as_tensor(channel_indices, device=x.device)
-            indices = torch.cat((channel_indices, torch.arange(
-                self.total_channels, self.total_channels + self.target_channels,
-                device=x.device,
-            )))
-            combined = torch.cat((x.reshape(batch, channels, patches, d_model),
-                                  target_memory), dim=1)
-            # Run the existing attention on [covariates; targets], then discard
-            # all appended target outputs. Do not detach the target K/V input.
-            mixed = self.forward(combined.flatten(0, 1),
-                                 channels + self.target_channels, indices)
-            return mixed.reshape_as(combined)[:, :channels].reshape_as(x)
         tokens = x.reshape(batch, channels, patches, d_model)
         tokens = tokens.permute(0, 2, 1, 3).reshape(batch * patches, channels, d_model)
         qk = tokens
@@ -70,7 +50,7 @@ class CovariateChannelAttention(nn.Module):
                 channel_indices = torch.as_tensor(channel_indices, device=x.device)
             if (channel_indices.ndim != 1 or channel_indices.numel() != channels
                     or channel_indices.min().item() < 0
-                    or channel_indices.max().item() >= self.total_channels + self.target_channels):
+                    or channel_indices.max().item() >= self.total_channels):
                 raise ValueError("Covariate channel indices are invalid")
             qk = tokens + self.channel_embedding[:, channel_indices].expand_as(tokens)
         update, _ = self.attention(qk, qk, tokens, attn_mask=None)
@@ -107,11 +87,11 @@ class CovariateEncoder(Encoder):
 
 
 def build_covariate_channel_layers(d_model, n_heads, layers, total_channels,
-                                     dropout, factor, channel_attn_mode, target_channels=0):
+                                     dropout, factor, channel_attn_mode):
     return [
         CovariateChannelAttention(
             d_model, n_heads, total_channels, dropout, factor,
-            channel_attn_mode, target_channels,
+            channel_attn_mode,
         )
         for _ in range(layers)
     ]
@@ -120,7 +100,7 @@ def build_covariate_channel_layers(d_model, n_heads, layers, total_channels,
 def build_covariate_encoder(d_model, d_ff, n_heads, layers, dropout,
                             factor, activation, use_rope,
                             self_channel_attn=False, channel_attn_mode="none",
-                            total_channels=None, target_channels=0):
+                            total_channels=None):
     # Covariates are encoded independently of targets. The mixed post-FFN state
     # feeds the next temporal layer or, at the final depth, the auxiliary head.
     temporal_layers = [
@@ -134,7 +114,7 @@ def build_covariate_encoder(d_model, d_ff, n_heads, layers, dropout,
             raise ValueError("Covariate self channel attention requires covariates")
         channel_layers = build_covariate_channel_layers(
             d_model, n_heads, layers, total_channels, dropout, factor,
-            channel_attn_mode, target_channels,
+            channel_attn_mode,
         )
     return CovariateEncoder(
         temporal_layers, norm_layer=nn.LayerNorm(d_model),
