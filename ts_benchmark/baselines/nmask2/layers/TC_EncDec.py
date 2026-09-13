@@ -74,6 +74,7 @@ class TemporalCausalityEncoder(nn.Module):
         if not isinstance(covariate_self_channel_attn, bool):
             raise ValueError("covariate_self_channel_attn must be a boolean")
         self.calendar_temporal_attn = calendar_temporal_attn
+        self.covariate_self_channel_attn = covariate_self_channel_attn
         self.use_covariate_calendar_attn = covariate_calendar_attn
         if covariate_calendar_attn and (not calendar_channels or not self.regular_covariates):
             raise ValueError(
@@ -141,6 +142,7 @@ class TemporalCausalityEncoder(nn.Module):
                 self_channel_attn=covariate_self_channel_attn,
                 channel_attn_mode=channel_attn_mode,
                 total_channels=enc_in - series_dim,
+                target_channels=series_dim if covariate_self_channel_attn else 0,
             )
             self.covariate_calendar_decoder = (
                 TargetDecoder([
@@ -157,6 +159,7 @@ class TemporalCausalityEncoder(nn.Module):
                     build_covariate_channel_layers(
                         d_model, n_heads, e_layers, self.regular_covariates,
                         dropout, factor, channel_attn_mode,
+                        target_channels=series_dim,
                     ) if covariate_self_channel_attn else None
                 ))
                 if covariate_calendar_attn else None
@@ -276,6 +279,75 @@ class TemporalCausalityEncoder(nn.Module):
                 nn.Dropout(dropout)
             )
         
+
+    def _forward_with_covariate_feedback(self, targets, covariates):
+        """Advance both streams at matching depths; read pre-channel memories."""
+        b, _, p, d = covariates.shape
+        encoder = self.covariate_encoder
+        conditioner = self.covariate_calendar_decoder
+
+        def encode_time(state, layer):
+            if state.shape[1] == 0:
+                return state, state
+            time, _ = layer(state.reshape(-1, p, d), state.shape[1], stop_after_time=True)
+            return time.reshape_as(state), encoder.norm(time).reshape_as(state)
+
+        def transition(state, index, target_time, indices=None):
+            if state.shape[1] == 0:
+                return state
+            flat = encoder.channel_layers[index](
+                state.reshape(-1, p, d), state.shape[1], indices,
+                target_memory=target_time,
+            )
+            return encoder.attn_layers[index].feed_forward(flat).reshape_as(state)
+
+        for index, target_layer in enumerate(self.target_decoder.layers):
+            target_time = target_layer.forward_time(targets)
+            cov_layer = encoder.attn_layers[index]
+            if conditioner is not None:
+                regular = covariates[:, :self.regular_covariates]
+                calendar = covariates[:, self.regular_covariates:]
+                if self.calendar_temporal_attn:
+                    calendar_time, calendar_memory = encode_time(calendar, cov_layer)
+                else:
+                    calendar_time = calendar_memory = calendar
+                regular_layer = conditioner.layers[index]
+                regular_time = regular_layer.forward_time(regular)
+                regular_memory = conditioner.norm(regular_time)
+                memory = torch.cat((regular_memory, calendar_memory), dim=1)
+                mixed = conditioner.channel_layers[index](
+                    regular_time.reshape(-1, p, d), self.regular_covariates,
+                    target_memory=target_time,
+                ).reshape_as(regular_time)
+                regular = regular_layer.feed_forward(
+                    regular_layer.forward_cross(mixed, calendar_memory))
+                if self.calendar_temporal_attn:
+                    calendar = transition(calendar_time, index, target_time,
+                        range(self.regular_covariates, covariates.shape[1]))
+                covariates = torch.cat((regular, calendar), dim=1)
+            else:
+                active = (covariates.shape[1] if self.calendar_temporal_attn
+                          else self.regular_covariates)
+                time, active_memory = encode_time(covariates[:, :active], cov_layer)
+                passive = covariates[:, active:]
+                memory = torch.cat((active_memory, passive), dim=1)
+                covariates = torch.cat((transition(time, index, target_time), passive), dim=1)
+            # Both interactions consume time states, never the other stream's
+            # same-layer channel update. Feedback becomes visible next depth.
+            targets = target_layer.feed_forward(target_layer.forward_cross(target_time, memory))
+
+        if conditioner is not None:
+            regular = conditioner.norm(covariates[:, :self.regular_covariates])
+            calendar = covariates[:, self.regular_covariates:]
+            if self.calendar_temporal_attn:
+                calendar = encoder.norm(calendar)
+            covariates = torch.cat((regular, calendar), dim=1)
+        else:
+            active = (covariates.shape[1] if self.calendar_temporal_attn
+                      else self.regular_covariates)
+            covariates = torch.cat((encoder.norm(covariates[:, :active]),
+                                    covariates[:, active:]), dim=1)
+        return self.target_decoder.norm(targets), covariates
 
     def _patch_observation_mask(self, batch, channels, length, observed, reference):
         """Build masks with the same right padding and unfolding as value patches."""
@@ -411,7 +483,9 @@ class TemporalCausalityEncoder(nn.Module):
         if self.architecture == "encoder_decoder":
             patches = patch_x.reshape(B, self.c_in, patch_x.shape[-2], patch_x.shape[-1])
             targets, covariates = patches[:, :X_D], patches[:, X_D:]
-            if self.covariate_calendar_decoder is not None:
+            if self.covariate_self_channel_attn:
+                targets, covariate_output = self._forward_with_covariate_feedback(targets, covariates)
+            elif self.covariate_calendar_decoder is not None:
                 regular = covariates[:, :self.regular_covariates]
                 calendar = covariates[:, self.regular_covariates:]
                 if self.calendar_temporal_attn:
@@ -466,7 +540,8 @@ class TemporalCausalityEncoder(nn.Module):
                 )
                 memories = [item.reshape_as(covariates) for item in memory_flat]
                 covariate_output = covariate_output_flat.reshape_as(covariates)
-            targets = self.target_decoder(targets, memories)
+            if not self.covariate_self_channel_attn:
+                targets = self.target_decoder(targets, memories)
             # Targets read time-only memories; the auxiliary covariate head reads
             # the complete final state after channel attention and the FFN.
             enc_x_out = torch.cat((targets, covariate_output), dim=1)
