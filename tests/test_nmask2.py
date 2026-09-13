@@ -15,6 +15,108 @@ from ts_benchmark.models.model_loader import get_models
 
 
 class Nmask2Tests(unittest.TestCase):
+    def test_shared_temporal_attention_validation(self):
+        self.assertFalse(Nmask2(seq_len=16).config.share_temporal_attn)
+        for value in (1, "true", None):
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                Nmask2(seq_len=16, share_temporal_attn=value)
+        with self.assertRaisesRegex(ValueError, "requires architecture"):
+            Nmask2(seq_len=16, architecture="joint", share_temporal_attn=True)
+
+    def test_shared_temporal_attention_streams_and_checkpoint(self):
+        for shared, calendar, future, calendar_time, calendar_cross, cov_channel in (
+            (False, False, True, False, False, False),
+            (True, False, True, False, False, False),
+            (True, False, False, False, False, True),
+            (True, True, True, False, True, False),
+            (True, True, True, True, True, True),
+            (True, True, True, True, False, False),
+            (True, True, True, False, False, False),
+        ):
+            with self.subTest(shared=shared, calendar=calendar, future=future,
+                              calendar_time=calendar_time, calendar_cross=calendar_cross,
+                              cov_channel=cov_channel):
+                options = dict(
+                    architecture="encoder_decoder", share_temporal_attn=shared,
+                    use_calendar_exog=calendar, covariate_calendar_attn=calendar_cross,
+                    calendar_temporal_attn=calendar_time, freq="h",
+                    covariate_self_channel_attn=cov_channel,
+                    channel_window=3, channel_summaries=4,
+                )
+                model = self.make_model("embedding", future=future, **options)
+                core = model.temporal_encoder
+                for index, layer in enumerate(core.target_decoder.layers):
+                    cov_layer = core.covariate_encoder.attn_layers[index]
+                    self.assertEqual(layer.time_attention is cov_layer.attention, shared)
+                    self.assertIsNot(layer.norm1, cov_layer.norm1)
+                    if calendar_cross:
+                        self.assertIs(layer.time_attention,
+                                      core.covariate_calendar_decoder.layers[index].time_attention)
+                self.assertIsNot(core.target_decoder.layers[0].time_attention,
+                                 core.target_decoder.layers[1].time_attention)
+                x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                marks = (torch.randn(2, 16, 4), torch.randn(2, 8, 4)) if calendar else (None, None)
+                prediction, _ = model(x, exog, None, *marks)
+                self.assertEqual(prediction.shape, (2, 8, 2))
+                prediction.square().mean().backward()
+                for layer in core.target_decoder.layers:
+                    grad = layer.time_attention.query_projection.weight.grad
+                    self.assertTrue(torch.isfinite(grad).all())
+                    self.assertGreater(grad.abs().sum().item(), 0)
+                restored = self.make_model("embedding", future=future, **options).eval()
+                checkpoint = io.BytesIO()
+                torch.save(model.state_dict(), checkpoint)
+                checkpoint.seek(0)
+                restored.load_state_dict(torch.load(checkpoint, weights_only=True))
+                with torch.no_grad():
+                    expected, _ = model.eval()(x, exog, None, *marks)
+                    actual, _ = restored(x, exog, None, *marks)
+                torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+                self.assertEqual(
+                    restored.temporal_encoder.target_decoder.layers[0].time_attention
+                    is restored.temporal_encoder.covariate_encoder.attn_layers[0].attention,
+                    shared,
+                )
+
+    def test_shared_temporal_attention_accumulates_both_stream_gradients(self):
+        model = self.make_model(architecture="encoder_decoder", share_temporal_attn=True)
+        core = model.temporal_encoder
+        cov = core.covariate_encoder.attn_layers[0].attention
+        target = core.target_decoder.layers[0].time_attention
+        a, b = torch.randn(2, 5, 16), torch.randn(3, 5, 16)
+        loss_a = cov(a, a, a, attn_mask=None)[0].square().mean()
+        loss_b = target(b, b, b, attn_mask=None)[0].square().mean()
+        params = tuple(target.parameters())
+        ga = torch.autograd.grad(loss_a, params, retain_graph=True)
+        gb = torch.autograd.grad(loss_b, params, retain_graph=True)
+        (loss_a + loss_b).backward()
+        for parameter, left, right in zip(params, ga, gb):
+            torch.testing.assert_close(parameter.grad, left + right)
+
+    def test_shared_temporal_attention_optimizer_and_equal_weight_reference(self):
+        options = dict(architecture="encoder_decoder", e_layers=3)
+        shared = self.make_model(share_temporal_attn=True, **options).double()
+        separate = self.make_model(share_temporal_attn=False, **options).double()
+        separate.load_state_dict(shared.state_dict())
+        x, exog = torch.randn(2, 16, 5).double(), torch.randn(2, 8, 3).double()
+        prediction, _ = shared(x, exog, None)
+        with torch.no_grad():
+            reference, _ = separate(x, exog, None)
+        torch.testing.assert_close(prediction, reference, rtol=0, atol=0)
+        optimizer = torch.optim.Adam(shared.parameters(), lr=0.001)
+        parameters = [p for group in optimizer.param_groups for p in group["params"]]
+        self.assertEqual(len(parameters), len({id(p) for p in parameters}))
+        self.assertLess(sum(p.numel() for p in shared.parameters()),
+                        sum(p.numel() for p in separate.parameters()))
+        before = shared.temporal_encoder.target_decoder.layers[0].time_attention.query_projection.weight.detach().clone()
+        prediction.square().mean().backward()
+        optimizer.step()
+        for index, layer in enumerate(shared.temporal_encoder.target_decoder.layers):
+            self.assertIs(layer.time_attention,
+                          shared.temporal_encoder.covariate_encoder.attn_layers[index].attention)
+        self.assertFalse(torch.equal(before,
+            shared.temporal_encoder.target_decoder.layers[0].time_attention.query_projection.weight))
+
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)

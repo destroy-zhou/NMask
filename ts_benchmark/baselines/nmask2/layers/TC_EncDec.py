@@ -51,9 +51,14 @@ class TemporalCausalityEncoder(nn.Module):
                  calendar_temporal_attn=True, covariate_calendar_attn=False,
                  use_patch_mask_embedding=False,
                  covariate_self_channel_attn=False,
+                 share_temporal_attn=False,
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
+        if not isinstance(share_temporal_attn, bool):
+            raise ValueError("share_temporal_attn must be a boolean")
+        if share_temporal_attn and architecture != "encoder_decoder":
+            raise ValueError("share_temporal_attn requires architecture=encoder_decoder")
         self.pred_len = pred_len
         self.series_dim = series_dim
         # self.criterion = criterion
@@ -163,6 +168,15 @@ class TemporalCausalityEncoder(nn.Module):
                     channel_summaries, local_time_rope, channel_fusion_mode, calendar_channels,
                 ) for _ in range(e_layers)
             ], d_model)
+            if share_temporal_attn:
+                # Tie modules, not copies: both streams accumulate gradients into
+                # the same Q/K/V/output projections at each matching depth.
+                # LayerNorm, FFN and different depths remain independent.
+                for index, target_layer in enumerate(self.target_decoder.layers):
+                    attention = target_layer.time_attention
+                    self.covariate_encoder.attn_layers[index].attention = attention
+                    if self.covariate_calendar_decoder is not None:
+                        self.covariate_calendar_decoder.layers[index].time_attention = attention
             if self.covariate_calendar_decoder is not None:
                 # Both streams use the same learned channel-attention transforms.
                 # Their layouts, masks and variable embeddings remain separate.

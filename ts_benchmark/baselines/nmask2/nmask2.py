@@ -51,6 +51,7 @@ MODEL_HYPER_PARAMS = {
     "covariate_calendar_attn": False,  # let ordinary covariates read calendar patches
     "use_patch_mask_embedding": False,  # add a projected observed/missing mask to each patch
     "covariate_self_channel_attn": False,  # mix exogenous channels after temporal attention
+    "share_temporal_attn": False,  # tie target/covariate time attention at matching depths
     "channel_fusion_mode": "cross_attn",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
@@ -79,6 +80,10 @@ class Nmask2(DeepForecastingModelBase):
             kwargs.setdefault("channel_window", 5)
             kwargs.setdefault("temporal_attn_scope", "all")
         super(Nmask2, self).__init__(MODEL_HYPER_PARAMS, **kwargs)
+        if not isinstance(self.config.share_temporal_attn, bool):
+            raise ValueError("share_temporal_attn must be a boolean")
+        if self.config.share_temporal_attn and self.config.architecture != "encoder_decoder":
+            raise ValueError("share_temporal_attn requires architecture=encoder_decoder")
         if not isinstance(self.config.use_calendar_exog, bool):
             raise ValueError("use_calendar_exog must be a boolean")
         if not isinstance(self.config.calendar_temporal_attn, bool):

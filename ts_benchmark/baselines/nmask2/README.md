@@ -25,6 +25,16 @@ values are used as input. At least one target and one covariate are required.
 
 ## Configuration
 
+Set `share_temporal_attn=true` to share the complete temporal-attention module
+(Q/K/V and output projections, with RoPE) between target and covariate streams
+at the same depth. The default is `false`. Different depths, LayerNorms and
+FFNs remain independent; streams still run separately and keep the same memory
+tap points. If covariate-calendar conditioning is enabled, its temporal
+attention uses the same module too. Calendar channels still skip temporal
+attention when `calendar_temporal_attn=false`. This switch requires
+`architecture=encoder_decoder`. Restore checkpoints with the same switch value
+used during training to preserve the intended parameter sharing.
+
 ```json
 {
   "architecture": "encoder_decoder",
