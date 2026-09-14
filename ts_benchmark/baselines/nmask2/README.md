@@ -84,7 +84,11 @@ architectures and defaults to false for checkpoint compatibility.
 
 Each target patch attends separately to W local patches and R adaptive-average
 summaries **per covariate**. A target-dependent softmax across covariates then
-fuses their outputs. W is a positive odd number of centered patch positions;
+fuses their outputs. W is any positive integer counting the current patch and
+W-1 preceding patches: target patch p reads [p-W+1, ..., p]. For W=3 this is
+[p-2, p-1, p], never p+1. Even window sizes are supported. This is relative to
+each query patch, not restricted to the pre-forecast historical segment.
+Only local retrieval changes; summaries still pool the full covariate timeline.
 R is nonnegative, with R=0 disabling summaries. Invalid boundary positions are
 masked, and the summary count is capped at the number of memory patches.
 The covariate encoder has a global temporal receptive field, so W limits direct

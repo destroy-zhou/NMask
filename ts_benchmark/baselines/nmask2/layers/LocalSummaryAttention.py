@@ -12,8 +12,8 @@ from .Embed import RotaryEmbedding
 def validate_channel_attention(attention_type, window, summaries):
     if attention_type not in ("full", "local_summary"):
         raise ValueError("channel_attn_type must be full or local_summary")
-    if isinstance(window, bool) or not isinstance(window, int) or window <= 0 or window % 2 == 0:
-        raise ValueError("channel_window must be a positive odd integer")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError("channel_window must be a positive integer")
     if isinstance(summaries, bool) or not isinstance(summaries, int) or summaries < 0:
         raise ValueError("channel_summaries must be a nonnegative integer")
 
@@ -111,7 +111,8 @@ class LocalSummaryAttention(nn.Module):
         return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
     def _local_indices(self, length, device):
-        offsets = torch.arange(-(self.window // 2), self.window // 2 + 1, device=device)
+        # Trailing window: W includes the current patch and W-1 past patches.
+        offsets = torch.arange(1 - self.window, 1, device=device)
         indices = torch.arange(length, device=device)[:, None] + offsets
         valid = (indices >= 0) & (indices < length)
         return indices.clamp(0, length - 1), valid
@@ -160,11 +161,11 @@ class LocalSummaryAttention(nn.Module):
             global_scores = torch.einsum("bshpd,behrd->bshepr", q, summary_k) / math.sqrt(d)
             scores = torch.cat([scores, global_scores], dim=-1)
         if self.calendar_channels:
-            # Calendar channels are last. Permit only the center local slot;
+            # Calendar channels are last. Permit only the current (last) local slot;
             # all neighboring slots and pooled summaries are invisible to them.
             allowed = torch.ones(c - s, 1, scores.shape[-1], dtype=torch.bool, device=x.device)
             allowed[-self.calendar_channels:] = False
-            allowed[-self.calendar_channels:, :, self.window // 2] = True
+            allowed[-self.calendar_channels:, :, self.window - 1] = True
             scores = scores.masked_fill(~allowed, float("-inf"))
         # Normalize within each variable first, then fuse variables dynamically.
         weights = self.dropout(torch.softmax(scores, dim=-1))

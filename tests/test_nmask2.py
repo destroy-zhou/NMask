@@ -271,7 +271,7 @@ class Nmask2Tests(unittest.TestCase):
     def test_local_summary_matches_explicit_reference_at_boundaries(self):
         # Direct per-position/per-variable evaluation checks sparse gathering,
         # boundary masking, summary count clamping and both normalization stages.
-        for mode, window, summaries in (("none", 5, 2), ("embedding", 1, 0), ("rope", 5, 8)):
+        for mode, window, summaries in (("none", 5, 2), ("embedding", 1, 0), ("rope", 5, 8), ("none", 4, 0)):
             with self.subTest(mode=mode, window=window, summaries=summaries):
                 module = LocalSummaryAttention(8, 2, 4, 2, window, summaries, mode,
                                                local_time_rope=False).double()
@@ -292,7 +292,7 @@ class Nmask2Tests(unittest.TestCase):
                         for position in range(3):
                             contexts = []
                             for variable in range(2, 4):
-                                start, stop = max(0, position - window // 2), min(3, position + window // 2 + 1)
+                                start, stop = max(0, position - window + 1), position + 1
                                 keys = k[batch, variable, start:stop].transpose(0, 1)
                                 values = v[batch, variable, start:stop].transpose(0, 1)
                                 if count:
@@ -325,6 +325,27 @@ class Nmask2Tests(unittest.TestCase):
             module.summaries = 1
             self.assertGreater((module(x)[:, :, 0] - module(changed)[:, :, 0]).abs().max().item(), 1e-5)
 
+    def test_local_summary_trailing_window_excludes_future_and_distant_past(self):
+        for fusion in ("dot", "qk", "mlp", "cross_attn"):
+            for window in (1, 3, 4, 12):
+                with self.subTest(fusion=fusion, window=window):
+                    module = LocalSummaryAttention(8, 2, 4, 1, window=window,
+                        summaries=0, mode="embedding", local_time_rope=True,
+                        channel_fusion_mode=fusion).eval()
+                    target = torch.randn(2, 1, 8, 8)
+                    memory = torch.randn(2, 3, 8, 8, requires_grad=True)
+                    output = module(target, memory)
+                    output[:, :, 4].sum().backward()
+                    self.assertEqual(memory.grad[:, :, 5:].abs().sum().item(), 0)
+                    start = max(0, 5 - window)
+                    self.assertEqual(memory.grad[:, :, :start].abs().sum().item(), 0)
+                    self.assertGreater(memory.grad[:, :, start:5].abs().sum().item(), 0)
+                    changed = memory.detach().clone()
+                    changed[:, :, 5:] += 100 * torch.randn_like(changed[:, :, 5:])
+                    with torch.no_grad():
+                        torch.testing.assert_close(module(target, changed)[:, :, :5],
+                                                   output[:, :, :5], rtol=0, atol=0)
+
     def test_local_summary_short_sequence_checkpoint_and_batching(self):
         module = LocalSummaryAttention(8, 2, 3, 1, window=5, summaries=4, mode="embedding").eval()
         restored = LocalSummaryAttention(8, 2, 3, 1, window=5, summaries=4, mode="embedding").eval()
@@ -338,7 +359,7 @@ class Nmask2Tests(unittest.TestCase):
 
     def test_local_summary_invalid_options(self):
         for options in ({"channel_attn_type": "bad"}, {"channel_window": 0},
-                        {"channel_window": 4}, {"channel_window": True},
+                        {"channel_window": 1.5}, {"channel_window": True},
                         {"channel_summaries": -1}, {"channel_summaries": 1.5}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Nmask2(seq_len=16, **options)
@@ -428,7 +449,7 @@ class Nmask2Tests(unittest.TestCase):
                 # Query p=2: check three local keys and the unchanged summary.
                 query = q[:, 0, 2]
                 logits = []
-                for pos in (1, 2, 3):
+                for pos in (0, 1, 2):
                     key = k[:, 1, pos]
                     angle = torch.tensor([pos - 2, (pos - 2) / 100], dtype=torch.float64)
                     pairs = key.reshape(2, 2, 2, 2)
@@ -791,7 +812,7 @@ class Nmask2CalendarTests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(2)
 
-    def test_calendar_masks_only_center_and_preserves_regular_attention(self):
+    def test_calendar_masks_only_current_and_preserves_regular_attention(self):
         for mode in ("none", "rope", "embedding"):
             for fusion in ("dot", "qk", "mlp", "cross_attn"):
                 module = LocalSummaryAttention(8, 2, 5, 1, window=5, summaries=3,
@@ -811,7 +832,7 @@ class Nmask2CalendarTests(unittest.TestCase):
                     torch.testing.assert_close(weights[..., :2, :, :], reference[0][..., :2, :, :], rtol=0, atol=0)
                     calendar_weights = weights[..., -2:, :, :]
                     expected = torch.zeros_like(calendar_weights)
-                    expected[..., 2] = 1
+                    expected[..., 4] = 1
                     torch.testing.assert_close(calendar_weights, expected, rtol=0, atol=0)
                     changed = x.clone()
                     changed[:, -2:, :3] += torch.randn_like(changed[:, -2:, :3]) * 10
