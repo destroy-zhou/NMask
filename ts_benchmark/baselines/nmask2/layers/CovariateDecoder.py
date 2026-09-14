@@ -126,7 +126,7 @@ class TargetDecoderLayer(nn.Module):
     def __init__(self, d_model, d_ff, n_heads, n_channels, target_channels,
                  dropout, factor, activation, use_rope, channel_attn_mode,
                  channel_window, channel_summaries, local_time_rope, channel_fusion_mode="dot",
-                 calendar_channels=0):
+                 calendar_channels=0, channel_group_gating=False):
         super().__init__()
         self.time_attention = time_attention(d_model, n_heads, dropout, factor, use_rope)
         head_dim = d_model // n_heads
@@ -139,6 +139,7 @@ class TargetDecoderLayer(nn.Module):
             local_time_rope=local_time_rope,
             channel_fusion_mode=channel_fusion_mode,
             calendar_channels=calendar_channels,
+            channel_group_gating=channel_group_gating,
         )
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

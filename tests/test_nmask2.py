@@ -15,6 +15,126 @@ from ts_benchmark.models.model_loader import get_models
 
 
 class Nmask2Tests(unittest.TestCase):
+    def test_channel_group_gating_validation_and_initialization(self):
+        self.assertFalse(Nmask2(seq_len=16).config.channel_group_gating)
+        for value in (1, "true", None):
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                Nmask2(seq_len=16, channel_group_gating=value)
+        with self.assertRaisesRegex(ValueError, "requires channel_attn_type"):
+            Nmask2(seq_len=16, architecture="joint", channel_attn_type="full",
+                   channel_fusion_mode="dot", channel_group_gating=True)
+        disabled = LocalSummaryAttention(8, 2, 3, 1, channel_group_gating=False)
+        self.assertIsNone(disabled.history_group_gate)
+        self.assertIsNone(disabled.summary_group_gate)
+        self.assertFalse(any("group_gate" in key for key in disabled.state_dict()))
+        enabled = LocalSummaryAttention(8, 2, 3, 1, channel_group_gating=True)
+        for gate in (enabled.history_group_gate, enabled.summary_group_gate):
+            torch.testing.assert_close(gate.weight, torch.zeros_like(gate.weight))
+            torch.testing.assert_close(gate.bias, torch.full_like(gate.bias, -3.0))
+            torch.testing.assert_close(torch.sigmoid(gate.bias),
+                                       torch.full_like(gate.bias, 0.047425873))
+
+    def test_channel_group_gating_controls_history_and_summaries(self):
+        torch.manual_seed(83)
+        target = torch.randn(2, 1, 6, 8, dtype=torch.float64)
+        memory = torch.randn(2, 2, 6, 8, dtype=torch.float64)
+        for source, window, summaries in (("history", 3, 0), ("summary", 1, 2)):
+            for fusion in ("dot", "qk", "mlp", "cross_attn"):
+                with self.subTest(source=source, fusion=fusion):
+                    module = LocalSummaryAttention(
+                        8, 2, 3, 1, window=window, summaries=summaries,
+                        mode="embedding", dropout=0.0,
+                        channel_fusion_mode=fusion,
+                        channel_group_gating=True,
+                    ).double().eval()
+                    selected_gate = (module.history_group_gate if source == "history"
+                                     else module.summary_group_gate)
+                    changed = memory.clone()
+                    changed[:, :, :4] += 20 * torch.randn_like(changed[:, :, :4])
+                    with torch.no_grad():
+                        selected_gate.bias.fill_(-1000)
+                        off_a = module(target, memory)[:, :, 4]
+                        off_b = module(target, changed)[:, :, 4]
+                        torch.testing.assert_close(off_a, off_b, rtol=0, atol=0)
+                        selected_gate.bias.fill_(1000)
+                        on_a = module(target, memory)[:, :, 4]
+                        on_b = module(target, changed)[:, :, 4]
+                        self.assertGreater((on_a - on_b).abs().max().item(), 1e-7)
+
+    def test_channel_group_gating_gradients_boundaries_and_calendar(self):
+        for mode in ("none", "rope", "embedding"):
+            with self.subTest(mode=mode):
+                module = LocalSummaryAttention(
+                    8, 2, 4, 1, window=8, summaries=3, mode=mode,
+                    dropout=0.0, channel_fusion_mode="cross_attn",
+                    channel_group_gating=True, calendar_channels=1,
+                ).train()
+                target = torch.randn(2, 1, 5, 8, requires_grad=True)
+                memory = torch.randn(2, 3, 5, 8, requires_grad=True)
+                output = module(target, memory)
+                self.assertTrue(torch.isfinite(output).all())
+                (output * torch.randn_like(output)).sum().backward()
+                for gate in (module.history_group_gate, module.summary_group_gate):
+                    self.assertIsNotNone(gate.weight.grad)
+                    self.assertGreater(gate.weight.grad.abs().sum().item(), 0)
+                self.assertGreater(target.grad.abs().sum().item(), 0)
+                self.assertGreater(memory.grad.abs().sum().item(), 0)
+                # Calendar history and summaries are masked; only its current
+                # patch can influence this target position.
+                module.eval()
+                changed = memory.detach().clone()
+                changed[:, -1, :4] += 100
+                with torch.no_grad():
+                    torch.testing.assert_close(module(target.detach(), memory.detach())[:, :, 4],
+                                               module(target.detach(), changed)[:, :, 4],
+                                               rtol=0, atol=0)
+
+    def test_channel_group_gating_model_forward_and_checkpoint(self):
+        for fusion in ("dot", "qk", "mlp", "cross_attn"):
+            with self.subTest(fusion=fusion):
+                options = dict(architecture="encoder_decoder",
+                               channel_group_gating=True,
+                               channel_fusion_mode=fusion,
+                               channel_window=3, channel_summaries=2)
+                model = self.make_model("embedding", **options).train()
+                x, exog = torch.randn(2, 16, 5), torch.randn(2, 8, 3)
+                output, auxiliary = model(x, exog, None)
+                self.assertEqual(output.shape, (2, 8, 2))
+                (output.square().mean() + auxiliary).backward()
+                for layer in model.temporal_encoder.target_decoder.layers:
+                    for gate in (layer.cross_attention.history_group_gate,
+                                 layer.cross_attention.summary_group_gate):
+                        self.assertGreater(gate.weight.grad.abs().sum().item(), 0)
+                restored = self.make_model("embedding", **options).eval()
+                restored.load_state_dict(model.state_dict())
+                with torch.no_grad():
+                    expected, _ = model.eval()(x, exog, None)
+                    actual, _ = restored(x, exog, None)
+                torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+
+        calendar_options = dict(
+            architecture="encoder_decoder", channel_group_gating=True,
+            channel_fusion_mode="cross_attn", channel_window=3,
+            channel_summaries=2, use_calendar_exog=True, freq="h",
+            calendar_temporal_attn=False, covariate_calendar_attn=True,
+        )
+        calendar_model = self.make_model("embedding", **calendar_options).train()
+        past_mark = torch.randn(2, 16, 4)
+        future_mark = torch.randn(2, 8, 4)
+        calendar_output, _ = calendar_model(
+            torch.randn(2, 16, 5), torch.randn(2, 8, 3), None,
+            past_mark, future_mark,
+        )
+        self.assertTrue(torch.isfinite(calendar_output).all())
+        calendar_output.square().mean().backward()
+        core = calendar_model.temporal_encoder
+        for index, layer in enumerate(core.covariate_calendar_decoder.layers):
+            target_attention = core.target_decoder.layers[index].cross_attention
+            self.assertIs(layer.cross_attention.history_group_gate,
+                          target_attention.history_group_gate)
+            self.assertIs(layer.cross_attention.summary_group_gate,
+                          target_attention.summary_group_gate)
+
     def test_shared_temporal_attention_validation(self):
         self.assertFalse(Nmask2(seq_len=16).config.share_temporal_attn)
         for value in (1, "true", None):

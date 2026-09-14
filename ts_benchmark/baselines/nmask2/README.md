@@ -43,6 +43,7 @@ used during training to preserve the intended parameter sharing.
   "temporal_attn_scope": "target_only",
   "channel_window": 1,
   "channel_summaries": 4,
+  "channel_group_gating": false,
   "local_time_rope": true,
   "channel_attn_mode": "rope",
   "covariate_self_channel_attn": false,
@@ -93,6 +94,24 @@ R is nonnegative, with R=0 disabling summaries. Invalid boundary positions are
 masked, and the summary count is capped at the number of memory patches.
 The covariate encoder has a global temporal receptive field, so W limits direct
 read locations, not the model's entire temporal receptive field.
+
+Set `channel_group_gating=true` to replace the first-stage joint softmax over
+local and summary slots with three source groups. The current patch contributes
+directly. The preceding `W-1` patches and the `R` Exo-Summaries are normalized
+within their own groups, then added through sample-dependent scalar gates:
+
+```text
+context = current + sigmoid(history_gate) * history
+                  + sigmoid(summary_gate) * summary
+```
+
+Each gate is a shared `Linear([target, current, group], 1)`. Its weight starts
+at zero and its bias at -3, so both optional contributions start at about
+`sigmoid(-3) = 0.047`. `W=1` disables the history contribution and `R=0`
+disables the summary contribution. Calendar channels still contribute only
+their current patch. The second-stage fusion across covariates is unchanged.
+The option defaults to false, and disabled models contain no group-gate
+parameters, preserving existing checkpoint layouts.
 
 | `channel_attn_mode` | Channel RoPE | Variable embeddings |
 | --- | --- | --- |

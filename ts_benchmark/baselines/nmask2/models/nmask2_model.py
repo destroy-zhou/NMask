@@ -59,6 +59,7 @@ class Nmask2Model(nn.Module):
             use_patch_mask_embedding=config.use_patch_mask_embedding,
             covariate_self_channel_attn=config.covariate_self_channel_attn,
             share_temporal_attn=config.share_temporal_attn,
+            channel_group_gating=config.channel_group_gating,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

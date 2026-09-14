@@ -52,6 +52,7 @@ class TemporalCausalityEncoder(nn.Module):
                  use_patch_mask_embedding=False,
                  covariate_self_channel_attn=False,
                  share_temporal_attn=False,
+                 channel_group_gating=False,
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
@@ -73,6 +74,11 @@ class TemporalCausalityEncoder(nn.Module):
             raise ValueError("use_patch_mask_embedding must be a boolean")
         if not isinstance(covariate_self_channel_attn, bool):
             raise ValueError("covariate_self_channel_attn must be a boolean")
+        if not isinstance(channel_group_gating, bool):
+            raise ValueError("channel_group_gating must be a boolean")
+        if channel_group_gating and channel_attn_type != "local_summary":
+            raise ValueError("channel_group_gating requires channel_attn_type=local_summary")
+        self.channel_group_gating = channel_group_gating
         self.calendar_temporal_attn = calendar_temporal_attn
         self.use_covariate_calendar_attn = covariate_calendar_attn
         if covariate_calendar_attn and (not calendar_channels or not self.regular_covariates):
@@ -150,7 +156,7 @@ class TemporalCausalityEncoder(nn.Module):
                         self.regular_covariates, dropout, factor, activation,
                         use_rope, channel_attn_mode, channel_window,
                         channel_summaries, local_time_rope,
-                        channel_fusion_mode, calendar_channels,
+                        channel_fusion_mode, calendar_channels, channel_group_gating,
                     )
                     for _ in range(e_layers)
                 ], d_model, channel_layers=(
@@ -166,6 +172,7 @@ class TemporalCausalityEncoder(nn.Module):
                     d_model, d_ff, n_heads, enc_in, series_dim, dropout, factor,
                     activation, use_rope, channel_attn_mode, channel_window,
                     channel_summaries, local_time_rope, channel_fusion_mode, calendar_channels,
+                    channel_group_gating,
                 ) for _ in range(e_layers)
             ], d_model)
             if share_temporal_attn:
@@ -579,6 +586,7 @@ class TemporalCausalityEncoder(nn.Module):
                         local_time_rope=self.local_time_rope,
                         channel_fusion_mode=self.channel_fusion_mode,
                         calendar_channels=self.calendar_channels,
+                        channel_group_gating=self.channel_group_gating,
                     ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)

@@ -26,7 +26,8 @@ def validate_channel_fusion(mode):
 class LocalSummaryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_channels, target_channels,
                  window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None,
-                 local_time_rope=True, channel_fusion_mode="dot", calendar_channels=0):
+                 local_time_rope=True, channel_fusion_mode="dot", calendar_channels=0,
+                 channel_group_gating=False):
         super().__init__()
         validate_channel_attention("local_summary", window, summaries)
         if mode not in ("rope", "none", "embedding"):
@@ -47,6 +48,9 @@ class LocalSummaryAttention(nn.Module):
         if not isinstance(local_time_rope, bool):
             raise ValueError("local_time_rope must be a boolean")
         self.local_time_rope = local_time_rope
+        if not isinstance(channel_group_gating, bool):
+            raise ValueError("channel_group_gating must be a boolean")
+        self.channel_group_gating = channel_group_gating
         width = n_heads * self.head_dim
         self.query_projection = nn.Linear(d_model, width)
         self.key_projection = nn.Linear(d_model, width)
@@ -62,6 +66,13 @@ class LocalSummaryAttention(nn.Module):
             nn.Linear(2 * width, min(64, width)), nn.GELU(),
             nn.Linear(min(64, width), 1, bias=False),
         ) if channel_fusion_mode == "mlp" else None
+        gate_input = d_model + 2 * width
+        self.history_group_gate = nn.Linear(gate_input, 1) if channel_group_gating else None
+        self.summary_group_gate = nn.Linear(gate_input, 1) if channel_group_gating else None
+        for gate in (self.history_group_gate, self.summary_group_gate):
+            if gate is not None:
+                nn.init.zeros_(gate.weight)
+                nn.init.constant_(gate.bias, -3.0)
         self.dropout = nn.Dropout(dropout)
         self.rope = RotaryEmbedding(self.head_dim) if mode == "rope" else None
         self.channel_embedding = None
@@ -75,11 +86,13 @@ class LocalSummaryAttention(nn.Module):
             raise TypeError("Attention projections can only be shared with LocalSummaryAttention")
         if (self.n_heads != other.n_heads or self.head_dim != other.head_dim
                 or self.mode != other.mode
-                or self.channel_fusion_mode != other.channel_fusion_mode):
+                or self.channel_fusion_mode != other.channel_fusion_mode
+                or self.channel_group_gating != other.channel_group_gating):
             raise ValueError("Shared channel attention requires matching attention settings")
         names = (
             "query_projection", "key_projection", "value_projection",
             "out_projection", "gate_query", "gate_key", "gate_value", "gate_mlp",
+            "history_group_gate", "summary_group_gate",
         )
         for name in names:
             source = getattr(other, name)
@@ -124,6 +137,19 @@ class LocalSummaryAttention(nn.Module):
         flat = tensor.permute(0, 1, 2, 4, 3).reshape(b * e * h, d, p)
         return F.adaptive_avg_pool1d(flat, count).reshape(b, e, h, d, count).transpose(-1, -2)
 
+    def _group_softmax(self, scores):
+        """Softmax a possibly fully masked group without producing NaNs."""
+        finite = torch.isfinite(scores)
+        has_value = finite.any(dim=-1, keepdim=True)
+        safe_scores = torch.where(has_value, scores, torch.zeros_like(scores))
+        return self.dropout(torch.softmax(safe_scores, dim=-1) * finite)
+
+    @staticmethod
+    def _flatten_context(context):
+        # [B, S, H, E, P, d] -> [B, S, P, E, H*d]
+        b, s, h, e, p, d = context.shape
+        return context.permute(0, 1, 4, 3, 2, 5).reshape(b, s, p, e, h * d)
+
     def forward(self, x, memory=None):
         if memory is not None:
             # A separate Q stream and read-only K/V stream. Concatenation here
@@ -167,12 +193,41 @@ class LocalSummaryAttention(nn.Module):
             allowed[-self.calendar_channels:] = False
             allowed[-self.calendar_channels:, :, self.window - 1] = True
             scores = scores.masked_fill(~allowed, float("-inf"))
-        # Normalize within each variable first, then fuse variables dynamically.
-        weights = self.dropout(torch.softmax(scores, dim=-1))
-        context = torch.einsum("bshepw,behpwd->bshepd", weights[..., :self.window], local_v)
-        if count:
-            context = context + torch.einsum("bshepr,behrd->bshepd", weights[..., self.window:], summary_v)
-        context = context.permute(0, 1, 4, 3, 2, 5).reshape(b, s, p, c - s, h * d)
+        # Either retain the original joint softmax or aggregate current,
+        # historical and summary sources independently before gated fusion.
+        if self.channel_group_gating:
+            current = local_v[..., self.window - 1, :].unsqueeze(1)
+            current = current.expand(-1, s, -1, -1, -1, -1).permute(0, 1, 3, 2, 4, 5)
+            current = self._flatten_context(current)
+            target = x[:, :s].unsqueeze(-2).expand(-1, -1, -1, c - s, -1)
+            context = current
+            if self.window > 1:
+                history_weights = self._group_softmax(scores[..., :self.window - 1])
+                history = torch.einsum(
+                    "bshepw,behpwd->bshepd", history_weights,
+                    local_v[..., :self.window - 1, :],
+                )
+                history = self._flatten_context(history)
+                history_gate = torch.sigmoid(self.history_group_gate(
+                    torch.cat((target, current, history), dim=-1)
+                ))
+                context = context + history_gate * history
+            if count:
+                summary_weights = self._group_softmax(scores[..., self.window:])
+                summary = torch.einsum("bshepr,behrd->bshepd",
+                                       summary_weights, summary_v)
+                summary = self._flatten_context(summary)
+                summary_gate = torch.sigmoid(self.summary_group_gate(
+                    torch.cat((target, current, summary), dim=-1)
+                ))
+                context = context + summary_gate * summary
+        else:
+            # Normalize within each variable first, then fuse variables dynamically.
+            weights = self.dropout(torch.softmax(scores, dim=-1))
+            context = torch.einsum("bshepw,behpwd->bshepd", weights[..., :self.window], local_v)
+            if count:
+                context = context + torch.einsum("bshepr,behrd->bshepd", weights[..., self.window:], summary_v)
+            context = self._flatten_context(context)
         gate_query = self.gate_query(qk[:, :s]).unsqueeze(-2)
         gate_keys = context
         if self.channel_embedding is not None:
