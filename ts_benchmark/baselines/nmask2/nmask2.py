@@ -41,7 +41,7 @@ MODEL_HYPER_PARAMS = {
     "warm_up_epoch": 4,
 
     "infer_use_future": False,
-    "channel_attn_mode": "rope",  # rope | none | embedding
+    "channel_attn_mode": "embedding",  # rope | none | embedding
     "architecture": "encoder_decoder",  # encoder_decoder | joint (legacy)
     "channel_attn_type": "local_summary",  # full is supported by joint only
     "channel_window": 1,
