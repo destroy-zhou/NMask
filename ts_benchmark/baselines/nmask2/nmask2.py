@@ -53,6 +53,7 @@ MODEL_HYPER_PARAMS = {
     "covariate_self_channel_attn": False,  # mix exogenous channels after temporal attention
     "share_temporal_attn": False,  # tie target/covariate time attention at matching depths
     "channel_group_gating": True,  # gated current + history + Exo-Summary aggregation
+    "channel_group_logit_bias": False,  # learned group priors in the joint local/summary softmax
     "channel_fusion_mode": "cross_attn",  # dot | qk | mlp | cross_attn; local_summary fusion
     "local_time_rope": True,  # independent of channel_attn_mode; local Q/K only
     "temporal_attn_scope": "target_only",  # all is supported by joint only
@@ -87,6 +88,12 @@ class Nmask2(DeepForecastingModelBase):
             raise ValueError("channel_group_gating must be a boolean")
         if self.config.channel_group_gating and self.config.channel_attn_type != "local_summary":
             raise ValueError("channel_group_gating requires channel_attn_type=local_summary")
+        if not isinstance(self.config.channel_group_logit_bias, bool):
+            raise ValueError("channel_group_logit_bias must be a boolean")
+        if self.config.channel_group_logit_bias and self.config.channel_attn_type != "local_summary":
+            raise ValueError("channel_group_logit_bias requires channel_attn_type=local_summary")
+        if self.config.channel_group_logit_bias and self.config.channel_group_gating:
+            raise ValueError("channel_group_logit_bias and channel_group_gating are mutually exclusive")
         if self.config.share_temporal_attn and self.config.architecture != "encoder_decoder":
             raise ValueError("share_temporal_attn requires architecture=encoder_decoder")
         if not isinstance(self.config.use_calendar_exog, bool):

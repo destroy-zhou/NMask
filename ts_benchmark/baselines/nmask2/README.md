@@ -43,7 +43,8 @@ used during training to preserve the intended parameter sharing.
   "temporal_attn_scope": "target_only",
   "channel_window": 1,
   "channel_summaries": 4,
-  "channel_group_gating": false,
+  "channel_group_gating": true,
+  "channel_group_logit_bias": false,
   "local_time_rope": true,
   "channel_attn_mode": "rope",
   "covariate_self_channel_attn": false,
@@ -110,8 +111,23 @@ at zero and its bias at -3, so both optional contributions start at about
 `sigmoid(-3) = 0.047`. `W=1` disables the history contribution and `R=0`
 disables the summary contribution. Calendar channels still contribute only
 their current patch. The second-stage fusion across covariates is unchanged.
-The option defaults to false, and disabled models contain no group-gate
-parameters, preserving existing checkpoint layouts.
+The option defaults to true. Disabled models contain no group-gate parameters,
+which preserves the earlier checkpoint layout.
+
+As an alternative, set `channel_group_logit_bias=true` to retain one joint
+softmax while adding learned group priors to its logits:
+
+```text
+current_logits' = current_logits
+history_logits' = history_logits + b_h - log(W - 1)
+summary_logits' = summary_logits + b_s - log(R)
+```
+
+`b_h` and `b_s` are learned scalars initialized to `-3`. The logarithmic terms
+keep each group's initial total unnormalized mass approximately independent of
+the number of tokens in that group. When fewer than `R` summaries are available,
+the implementation uses the actual summary count. This option and
+`channel_group_gating` cannot be enabled together.
 
 | `channel_attn_mode` | Channel RoPE | Variable embeddings |
 | --- | --- | --- |

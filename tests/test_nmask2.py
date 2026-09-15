@@ -1,5 +1,6 @@
 import io
 import json
+import math
 from pathlib import Path
 import shlex
 import unittest
@@ -15,8 +16,120 @@ from ts_benchmark.models.model_loader import get_models
 
 
 class Nmask2Tests(unittest.TestCase):
+    def test_channel_group_logit_bias_validation_and_initialization(self):
+        self.assertFalse(Nmask2(seq_len=16).config.channel_group_logit_bias)
+        for value in (1, "true", None):
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                Nmask2(seq_len=16, channel_group_logit_bias=value)
+        with self.assertRaisesRegex(ValueError, "requires channel_attn_type"):
+            Nmask2(seq_len=16, architecture="joint", channel_attn_type="full",
+                   channel_fusion_mode="dot", channel_group_gating=False,
+                   channel_group_logit_bias=True)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            Nmask2(seq_len=16, channel_group_gating=True,
+                   channel_group_logit_bias=True)
+
+        disabled = LocalSummaryAttention(8, 2, 3, 1,
+                                         channel_group_logit_bias=False)
+        self.assertIsNone(disabled.history_logit_bias)
+        self.assertIsNone(disabled.summary_logit_bias)
+        self.assertFalse(any("logit_bias" in key for key in disabled.state_dict()))
+        enabled = LocalSummaryAttention(
+            8, 2, 3, 1, window=3, summaries=2,
+            channel_group_logit_bias=True,
+        )
+        torch.testing.assert_close(enabled.history_logit_bias,
+                                   torch.tensor(-3.0))
+        torch.testing.assert_close(enabled.summary_logit_bias,
+                                   torch.tensor(-3.0))
+        empty_groups = LocalSummaryAttention(
+            8, 2, 3, 1, window=1, summaries=0,
+            channel_group_logit_bias=True,
+        )
+        self.assertIsNone(empty_groups.history_logit_bias)
+        self.assertIsNone(empty_groups.summary_logit_bias)
+
+    def test_channel_group_logit_bias_matches_formula(self):
+        module = LocalSummaryAttention(
+            1, 1, 2, 1, window=3, summaries=2, mode="none",
+            dropout=0.0, local_time_rope=False,
+            channel_fusion_mode="dot", channel_group_logit_bias=True,
+        ).double().eval()
+        with torch.no_grad():
+            for projection in (
+                    module.query_projection, module.key_projection,
+                    module.value_projection, module.out_projection):
+                projection.weight.fill_(1)
+                projection.bias.zero_()
+        target = torch.full((1, 1, 4, 1), 0.5, dtype=torch.float64)
+        memory = torch.tensor([1.0, 2.0, 4.0, 8.0], dtype=torch.float64).reshape(1, 1, 4, 1)
+        actual = module(target, memory)[0, 0, 3, 0]
+
+        logits = torch.tensor([1.0, 2.0, 4.0, 0.75, 3.0], dtype=torch.float64)
+        logits[:2] += -3.0 - math.log(2)
+        logits[3:] += -3.0 - math.log(2)
+        values = torch.tensor([2.0, 4.0, 8.0, 1.5, 6.0], dtype=torch.float64)
+        expected = (torch.softmax(logits, dim=0) * values).sum()
+        torch.testing.assert_close(actual, expected)
+
+        actual.backward()
+        self.assertGreater(module.history_logit_bias.grad.abs().item(), 0)
+        self.assertGreater(module.summary_logit_bias.grad.abs().item(), 0)
+
+    def test_channel_group_logit_bias_model_paths_and_checkpoint(self):
+        for architecture in ("joint", "encoder_decoder"):
+            with self.subTest(architecture=architecture):
+                options = dict(
+                    architecture=architecture, channel_attn_type="local_summary",
+                    channel_group_gating=False, channel_group_logit_bias=True,
+                    channel_window=3,
+                    channel_summaries=2, channel_fusion_mode="cross_attn",
+                )
+                model = self.make_model("embedding", **options).train()
+                output, auxiliary = model(
+                    torch.randn(2, 16, 5), torch.randn(2, 8, 3), None
+                )
+                self.assertEqual(output.shape, (2, 8, 2))
+                (output.square().mean() + auxiliary).backward()
+                layers = (model.temporal_encoder.encoder_x.attn_layers
+                          if architecture == "joint"
+                          else model.temporal_encoder.target_decoder.layers)
+                attentions = [
+                    layer.local_channel_attention if architecture == "joint"
+                    else layer.cross_attention
+                    for layer in layers
+                ]
+                for attention in attentions:
+                    self.assertGreater(attention.history_logit_bias.grad.abs().item(), 0)
+                    self.assertGreater(attention.summary_logit_bias.grad.abs().item(), 0)
+
+                restored = self.make_model("embedding", **options)
+                restored.load_state_dict(model.state_dict())
+
+        calendar_options = dict(
+            architecture="encoder_decoder", channel_group_gating=False,
+            channel_group_logit_bias=True,
+            channel_window=3, channel_summaries=2,
+            channel_fusion_mode="cross_attn", use_calendar_exog=True,
+            freq="h", calendar_temporal_attn=False,
+            covariate_calendar_attn=True,
+        )
+        calendar_model = self.make_model("embedding", **calendar_options)
+        core = calendar_model.temporal_encoder
+        for index, layer in enumerate(core.covariate_calendar_decoder.layers):
+            target_attention = core.target_decoder.layers[index].cross_attention
+            self.assertIs(layer.cross_attention.history_logit_bias,
+                          target_attention.history_logit_bias)
+            self.assertIs(layer.cross_attention.summary_logit_bias,
+                          target_attention.summary_logit_bias)
+        calendar_output, _ = calendar_model(
+            torch.randn(2, 16, 5), torch.randn(2, 8, 3), None,
+            torch.randn(2, 16, 4), torch.randn(2, 8, 4),
+        )
+        self.assertTrue(torch.isfinite(calendar_output).all())
+
     def test_channel_group_gating_validation_and_initialization(self):
-        self.assertFalse(Nmask2(seq_len=16).config.channel_group_gating)
+        self.assertTrue(Nmask2(seq_len=16).config.channel_group_gating)
         for value in (1, "true", None):
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 Nmask2(seq_len=16, channel_group_gating=value)

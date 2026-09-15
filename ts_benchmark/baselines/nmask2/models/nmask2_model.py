@@ -60,6 +60,7 @@ class Nmask2Model(nn.Module):
             covariate_self_channel_attn=config.covariate_self_channel_attn,
             share_temporal_attn=config.share_temporal_attn,
             channel_group_gating=config.channel_group_gating,
+            channel_group_logit_bias=config.channel_group_logit_bias,
         )
 
         # self.cov_encoder = CovCausalityEncoder(

@@ -27,7 +27,7 @@ class LocalSummaryAttention(nn.Module):
     def __init__(self, d_model, n_heads, n_channels, target_channels,
                  window=5, summaries=4, mode="rope", dropout=0.0, head_dim=None,
                  local_time_rope=True, channel_fusion_mode="dot", calendar_channels=0,
-                 channel_group_gating=False):
+                 channel_group_gating=False, channel_group_logit_bias=False):
         super().__init__()
         validate_channel_attention("local_summary", window, summaries)
         if mode not in ("rope", "none", "embedding"):
@@ -50,7 +50,12 @@ class LocalSummaryAttention(nn.Module):
         self.local_time_rope = local_time_rope
         if not isinstance(channel_group_gating, bool):
             raise ValueError("channel_group_gating must be a boolean")
+        if not isinstance(channel_group_logit_bias, bool):
+            raise ValueError("channel_group_logit_bias must be a boolean")
+        if channel_group_gating and channel_group_logit_bias:
+            raise ValueError("channel_group_logit_bias and channel_group_gating are mutually exclusive")
         self.channel_group_gating = channel_group_gating
+        self.channel_group_logit_bias = channel_group_logit_bias
         width = n_heads * self.head_dim
         self.query_projection = nn.Linear(d_model, width)
         self.key_projection = nn.Linear(d_model, width)
@@ -73,6 +78,14 @@ class LocalSummaryAttention(nn.Module):
             if gate is not None:
                 nn.init.zeros_(gate.weight)
                 nn.init.constant_(gate.bias, -3.0)
+        self.history_logit_bias = (
+            nn.Parameter(torch.tensor(-3.0))
+            if channel_group_logit_bias and window > 1 else None
+        )
+        self.summary_logit_bias = (
+            nn.Parameter(torch.tensor(-3.0))
+            if channel_group_logit_bias and summaries > 0 else None
+        )
         self.dropout = nn.Dropout(dropout)
         self.rope = RotaryEmbedding(self.head_dim) if mode == "rope" else None
         self.channel_embedding = None
@@ -87,12 +100,14 @@ class LocalSummaryAttention(nn.Module):
         if (self.n_heads != other.n_heads or self.head_dim != other.head_dim
                 or self.mode != other.mode
                 or self.channel_fusion_mode != other.channel_fusion_mode
-                or self.channel_group_gating != other.channel_group_gating):
+                or self.channel_group_gating != other.channel_group_gating
+                or self.channel_group_logit_bias != other.channel_group_logit_bias):
             raise ValueError("Shared channel attention requires matching attention settings")
         names = (
             "query_projection", "key_projection", "value_projection",
             "out_projection", "gate_query", "gate_key", "gate_value", "gate_mlp",
             "history_group_gate", "summary_group_gate",
+            "history_logit_bias", "summary_logit_bias",
         )
         for name in names:
             source = getattr(other, name)
@@ -186,6 +201,20 @@ class LocalSummaryAttention(nn.Module):
             summary_k, summary_v = self._pool(k, count), self._pool(v, count)
             global_scores = torch.einsum("bshpd,behrd->bshepr", q, summary_k) / math.sqrt(d)
             scores = torch.cat([scores, global_scores], dim=-1)
+        if self.channel_group_logit_bias:
+            biased_groups = []
+            if self.window > 1:
+                biased_groups.append(
+                    scores[..., :self.window - 1]
+                    + self.history_logit_bias - math.log(self.window - 1)
+                )
+            biased_groups.append(scores[..., self.window - 1:self.window])
+            if count:
+                biased_groups.append(
+                    scores[..., self.window:]
+                    + self.summary_logit_bias - math.log(count)
+                )
+            scores = torch.cat(biased_groups, dim=-1)
         if self.calendar_channels:
             # Calendar channels are last. Permit only the current (last) local slot;
             # all neighboring slots and pooled summaries are invisible to them.
