@@ -45,6 +45,8 @@ events.out.tfevents.*
 *.pth
 *.ckpt
 *.safetensors
+/实验结果.xlsx
+/screenlog.0
 
 # Editor and operating-system files
 .idea/
