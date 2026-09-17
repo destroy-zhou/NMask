@@ -47,6 +47,9 @@ events.out.tfevents.*
 *.safetensors
 /实验结果.xlsx
 /screenlog.0
+/LICENSE
+/tests/
+/paper/
 
 # Editor and operating-system files
 .idea/
