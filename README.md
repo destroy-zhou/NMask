@@ -17,5 +17,5 @@ pip install -r requirements.txt
 - We provide the experiment scripts under `./scripts/covariate_forecasting`. You can reproduce the results with:
 
 ```shell
-sh ./scripts/covariate_forecasting/nmask.sh
+bash ./scripts/covariate_forecasting/nmask.sh
 ```
