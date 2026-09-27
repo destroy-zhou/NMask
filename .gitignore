@@ -51,6 +51,8 @@ events.out.tfevents.*
 /LICENSE
 /tests/
 /paper/
+/docs/
+/scripts/train/
 
 # Chronos2 integration
 /ts_benchmark/baselines/chronos2/
