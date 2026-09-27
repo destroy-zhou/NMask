@@ -46,7 +46,7 @@ DEFAULT_HYPER_PARAMS = {
     "conv_dropout": 0.1,
     "alpha_cov": 1.0,
     "mlp_hidden_dims": 64,
-    "output_efficiency": True
+    "output_efficiency": False
 }
 
 
