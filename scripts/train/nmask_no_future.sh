@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+
+# Run from the repository root. Each enabled case runs 25 (d_model, d_ff) combinations.
+# 24 cases enabled, with 25 (d_model, d_ff) combinations per case (600 runs).
+
+# Fixed parameters follow scripts/covariate_forecasting/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate.sh.
+
+# architecture=encoder_decoder; temporal_attn_scope=target_only; use_future_exog=false.
+# channel_fusion_mode=cross_attn; covariate_self_channel_attn=true.
+# channel_attn_type=local_summary; channel_window=1; channel_summaries=0; channel_attn_mode=embedding.
+
+# set -e
+
+# NP.csv: horizon=24, e_layers=2, lr=0.01, patch_len=12
+# for dm in 32 64 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running NP.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "NP.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.01, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 168, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "NP/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # NP.csv: horizon=360, e_layers=2, lr=0.01, patch_len=12
+# for dm in 32 64 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running NP.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "NP.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.01, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 720, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "NP/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# PJM.csv: horizon=24, e_layers=2, lr=0.001, patch_len=12
+# for dm in 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running PJM.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "PJM.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 168, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "PJM/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # PJM.csv: horizon=360, e_layers=2, lr=0.001, patch_len=12
+# for dm in 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running PJM.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "PJM.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 720, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "PJM/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# BE.csv: horizon=24, e_layers=1, lr=0.001, patch_len=12
+# for dm in 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running BE.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "BE.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.7, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 168, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "BE/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # BE.csv: horizon=360, e_layers=1, lr=0.001, patch_len=12
+# for dm in 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running BE.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "BE.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.7, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 12, "patience": 5, "seq_len": 720, "stride": 12, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "BE/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# FR.csv: horizon=24, e_layers=2, lr=0.001, patch_len=24
+# for dm in 256
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running FR.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "FR.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 24, "patience": 5, "seq_len": 168, "stride": 24, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "FR/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # FR.csv: horizon=360, e_layers=2, lr=0.001, patch_len=24
+# for dm in 256
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running FR.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "FR.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 24, "patience": 5, "seq_len": 720, "stride": 24, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "FR/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# DE.csv: horizon=24, e_layers=1, lr=0.001, patch_len=48
+# for dm in 64 128 256
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running DE.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "DE.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 168, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "DE/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # DE.csv: horizon=360, e_layers=1, lr=0.001, patch_len=48
+# for dm in 64 128 256
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running DE.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "DE.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 720, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "DE/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# Energy.csv: horizon=24, e_layers=1, lr=0.01, patch_len=48
+for dm in 16 32 64 128 256 512
+do
+for df in 16 32 64 128 256 512
+do
+for pl in 12 24 72
+do
+echo "Running Energy.csv, horizon=24, d_model=$dm, d_ff=$df"
+python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Energy.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 24, "loss": "MAE", "lr": 0.01, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 168, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Energy/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+done
+done
+done
+
+# Energy.csv: horizon=360, e_layers=1, lr=0.01, patch_len=48
+for dm in 16 32 64 128 256 512
+do
+for df in 16 32 64 128 256 512
+do
+for pl in 12 24 72
+do
+echo "Running Energy.csv, horizon=360, d_model=$dm, d_ff=$df"
+python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Energy.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 360, "loss": "MAE", "lr": 0.01, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 720, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Energy/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+done
+done
+done
+
+# Sdwpfm1.csv: horizon=24, e_layers=1, lr=0.001, patch_len=48
+# for dm in 16 32 64 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running Sdwpfm1.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfm1.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 168, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfm1/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # Sdwpfm1.csv: horizon=360, e_layers=1, lr=0.001, patch_len=48
+# for dm in 16 32 64 128
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running Sdwpfm1.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfm1.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 720, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfm1/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# Sdwpfm2.csv: horizon=24, e_layers=1, lr=0.001, patch_len=48
+# for dm in 16 32 64 128 256 512
+# do
+# for df in 16 32 64 128 256 512
+# do
+# echo "Running Sdwpfm2.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfm2.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 168, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfm2/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # Sdwpfm2.csv: horizon=360, e_layers=1, lr=0.001, patch_len=48
+# for dm in 16 32 64 128 256 512
+# do
+# for df in 16 32 64 128 256 512
+# do
+# echo "Running Sdwpfm2.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfm2.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 48, "patience": 5, "seq_len": 720, "stride": 48, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfm2/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# Sdwpfh1.csv: horizon=24, e_layers=1, lr=0.001, patch_len=12
+# for dm in 32 64 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# for pl in 6 24
+# do
+# echo "Running Sdwpfh1.csv, horizon=24, d_model=$dm, d_ff=$df, pl=$pl"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfh1.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 168, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfh1/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+# done
+
+# # Sdwpfh1.csv: horizon=360, e_layers=1, lr=0.001, patch_len=12
+# for dm in 32 64 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# for pl in 6 24
+# do
+# echo "Running Sdwpfh1.csv, horizon=360, d_model=$dm, d_ff=$df, pl=$pl"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfh1.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 1, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 720, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfh1/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+# done
+
+# Sdwpfh2.csv: horizon=24, e_layers=1, lr=0.001, patch_len=24
+# for dm in 32 64 128 256 512
+# do
+# for df in 16 32 64 128 256 512
+# do
+# echo "Running Sdwpfh2.csv, horizon=24, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfh2.csv" --strategy-args '{"horizon": 24, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 24, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 24, "patience": 5, "seq_len": 168, "stride": 24, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfh2/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # Sdwpfh2.csv: horizon=360, e_layers=1, lr=0.001, patch_len=24
+# for dm in 32 64 128 256 512
+# do
+# for df in 16 32 64 128 256 512
+# do
+# echo "Running Sdwpfh2.csv, horizon=360, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Sdwpfh2.csv" --strategy-args '{"horizon": 360, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0.1, "e_layers": 2, "horizon": 360, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 24, "patience": 5, "seq_len": 720, "stride": 24, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Sdwpfh2/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# Colbun.csv: horizon=10, e_layers=1, lr=0.001, patch_len=60
+# for dm in 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running Colbun.csv, horizon=10, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Colbun.csv" --strategy-args '{"horizon": 10, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 10, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 60, "patience": 5, "seq_len": 60, "stride": 60, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Colbun/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# # Colbun.csv: horizon=30, e_layers=1, lr=0.001, patch_len=60
+# for dm in 128 256 512
+# do
+# for df in 32 64 128 256 512
+# do
+# echo "Running Colbun.csv, horizon=30, d_model=$dm, d_ff=$df"
+# python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Colbun.csv" --strategy-args '{"horizon": 30, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.5, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 30, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": 60, "patience": 5, "seq_len": 180, "stride": 60, "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Colbun/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+# done
+# done
+
+# Rapel.csv: horizon=10, e_layers=1, lr=0.001, patch_len=15
+for dm in 32 64 128 256 512
+do
+for df in 32 64 128 256 512
+do
+for pl in 15
+do
+echo "Running Rapel.csv, horizon=10, d_model=$dm, d_ff=$df"
+python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Rapel.csv" --strategy-args '{"horizon": 10, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.1, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 10, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 60, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Rapel/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+done
+done
+done
+
+# Rapel.csv: horizon=30, e_layers=1, lr=0.001, patch_len=15
+for dm in 32 64 128 256 512
+do
+for df in 32 64 128 256 512
+do
+for pl in 15
+do
+echo "Running Rapel.csv, horizon=30, d_model=$dm, d_ff=$df, patch_len=$pl"
+python ./scripts/run_benchmark.py --config-path "rolling_forecast_config.json" --data-name-list "Rapel.csv" --strategy-args '{"horizon": 30, "target_channel": [-1]}' --model-name "nmask.Nmask" --model-hyper-params '{"alpha": 0.1, "batch_size": 64, "d_ff": '$df', "d_model": '$dm', "dropout": 0, "e_layers": 2, "horizon": 30, "loss": "MAE", "lr": 0.001, "lradj": "type3", "n_heads": 4, "norm": true, "num_epochs": 50, "patch_len": '$pl', "patience": 5, "seq_len": 180, "stride": '$pl', "pad_method": "learn", "predict_method": "future_patch", "use_t": 1, "use_t_exog": 1, "channel_attn_mode": "embedding", "channel_attn_type": "local_summary", "channel_fusion_mode": "cross_attn", "channel_window": 1, "channel_summaries": 0, "covariate_self_channel_attn": true, "channel_group_gating": false, "architecture": "encoder_decoder", "temporal_attn_scope": "target_only", "use_future_exog": false}' --gpus 0 --num-workers 1 --timeout 60000 --save-path "Rapel/nmask_no_future/encoder_decoder_embedding_w1_r0_ngate"
+done
+done
+done

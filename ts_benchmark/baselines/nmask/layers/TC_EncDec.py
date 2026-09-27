@@ -6,6 +6,11 @@ import numpy as np
 from ts_benchmark.baselines.nmask.layers.Embed import PatchEmbedding, CompressAndProject, PositionalEmbedding
 from ts_benchmark.baselines.nmask.layers.SelfAttention_Family import FullAttention, AttentionLayer
 from ts_benchmark.baselines.nmask.layers.Transformer_EncDec import Encoder, EncoderLayer
+from ts_benchmark.baselines.nmask.layers.LocalSummaryAttention import LocalSummaryAttention, validate_channel_attention, validate_channel_fusion
+from ts_benchmark.baselines.nmask.layers.CovariateDecoder import (
+    build_covariate_channel_layers, build_covariate_encoder,
+    TargetDecoder, TargetDecoderLayer,
+)
 
 
 class FlattenHead(nn.Module):
@@ -38,18 +43,88 @@ def FFT_for_Period(x, k=1):
 class TemporalCausalityEncoder(nn.Module):
     def __init__(self, enc_in, seq_len, pred_len, series_dim,
                  patch_len, stride, d_model, d_ff, n_heads, e_layers,
-                 dropout, factor, activation, pad_method, predict_method, use_future_exog, use_rope=True
+                 dropout, factor, activation, pad_method, predict_method, use_future_exog, use_rope=True,
+                 channel_attn_mode="rope", channel_attn_type="local_summary",
+                 channel_window=1, channel_summaries=4, local_time_rope=True,
+                 temporal_attn_scope="target_only", architecture="encoder_decoder",
+                 channel_fusion_mode="dot", calendar_channels=0,
+                 calendar_temporal_attn=True, covariate_calendar_attn=False,
+                 use_patch_mask_embedding=False,
+                 covariate_self_channel_attn=False,
+                 share_temporal_attn=False,
+                 channel_group_gating=False,
+                 channel_group_logit_bias=False,
                  ):
         super(TemporalCausalityEncoder, self).__init__()
         self.seq_len = seq_len
+        if not isinstance(share_temporal_attn, bool):
+            raise ValueError("share_temporal_attn must be a boolean")
+        if share_temporal_attn and architecture != "encoder_decoder":
+            raise ValueError("share_temporal_attn requires architecture=encoder_decoder")
         self.pred_len = pred_len
         self.series_dim = series_dim
         # self.criterion = criterion
         self.c_in = enc_in
+        self.calendar_channels = calendar_channels
+        self.regular_covariates = enc_in - series_dim - calendar_channels
+        if not isinstance(calendar_temporal_attn, bool):
+            raise ValueError("calendar_temporal_attn must be a boolean")
+        if not isinstance(covariate_calendar_attn, bool):
+            raise ValueError("covariate_calendar_attn must be a boolean")
+        if not isinstance(use_patch_mask_embedding, bool):
+            raise ValueError("use_patch_mask_embedding must be a boolean")
+        if not isinstance(covariate_self_channel_attn, bool):
+            raise ValueError("covariate_self_channel_attn must be a boolean")
+        if not isinstance(channel_group_gating, bool):
+            raise ValueError("channel_group_gating must be a boolean")
+        if channel_group_gating and channel_attn_type != "local_summary":
+            raise ValueError("channel_group_gating requires channel_attn_type=local_summary")
+        if not isinstance(channel_group_logit_bias, bool):
+            raise ValueError("channel_group_logit_bias must be a boolean")
+        if channel_group_logit_bias and channel_attn_type != "local_summary":
+            raise ValueError("channel_group_logit_bias requires channel_attn_type=local_summary")
+        if channel_group_logit_bias and channel_group_gating:
+            raise ValueError("channel_group_logit_bias and channel_group_gating are mutually exclusive")
+        self.channel_group_gating = channel_group_gating
+        self.channel_group_logit_bias = channel_group_logit_bias
+        self.calendar_temporal_attn = calendar_temporal_attn
+        self.use_covariate_calendar_attn = covariate_calendar_attn
+        if covariate_calendar_attn and (not calendar_channels or not self.regular_covariates):
+            raise ValueError(
+                "covariate_calendar_attn requires ordinary covariates and calendar channels"
+            )
+        if calendar_channels and channel_attn_type != "local_summary":
+            raise ValueError("Calendar covariates require local_summary attention")
         self.pad_method = pad_method
         self.predict_method = predict_method
         self.use_future_exog = use_future_exog
         self.use_rope = use_rope
+        if architecture not in ("encoder_decoder", "joint"):
+            raise ValueError("architecture must be encoder_decoder or joint")
+        self.architecture = architecture
+        if calendar_channels and not calendar_temporal_attn and architecture != "encoder_decoder":
+            raise ValueError("calendar_temporal_attn=false requires architecture=encoder_decoder")
+        if covariate_calendar_attn and architecture != "encoder_decoder":
+            raise ValueError("covariate_calendar_attn requires architecture=encoder_decoder")
+        if covariate_self_channel_attn and architecture != "encoder_decoder":
+            raise ValueError("covariate_self_channel_attn requires architecture=encoder_decoder")
+        if architecture == "encoder_decoder":
+            if not 0 < series_dim < enc_in:
+                raise ValueError("encoder_decoder requires at least one target and one covariate")
+            if channel_attn_type != "local_summary" or temporal_attn_scope != "target_only":
+                raise ValueError("encoder_decoder requires channel_attn_type=local_summary and temporal_attn_scope=target_only")
+        if channel_attn_mode not in ("rope", "none", "embedding"):
+            raise ValueError("channel_attn_mode must be one of: rope, none, embedding")
+        self.channel_attn_mode = channel_attn_mode
+        validate_channel_attention(channel_attn_type, channel_window, channel_summaries)
+        self.channel_attn_type = channel_attn_type
+        self.channel_window, self.channel_summaries = channel_window, channel_summaries
+        self.local_time_rope = local_time_rope
+        validate_channel_fusion(channel_fusion_mode)
+        if channel_attn_type != "local_summary" and channel_fusion_mode != "dot":
+            raise ValueError("channel_fusion_mode qk/mlp/cross_attn requires channel_attn_type=local_summary")
+        self.channel_fusion_mode = channel_fusion_mode
+        self.temporal_attn_scope = temporal_attn_scope
         stride = patch_len
         padding = stride
         future_patch_num = int((pred_len - patch_len) / stride + 2)
@@ -65,16 +140,72 @@ class TemporalCausalityEncoder(nn.Module):
         self.x_patch_embedding = PatchEmbedding(
             d_model, patch_len, stride, padding, dropout
         )
+        self.patch_mask_embedding = (
+            nn.Linear(patch_len, d_model) if use_patch_mask_embedding else None
+        )
         self.position_embedding = PositionalEmbedding(d_model)
 
         # self.encoder_exg = self._build_encoder(
         #     d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=True,
         #     factor=factor, e_layers=e_layers, use_rope=use_rope
         # )
-        self.encoder_x = self._build_encoder(
-            d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=False,
-            factor=factor, e_layers=e_layers, use_rope=use_rope
-        )
+        if self.architecture == "encoder_decoder":
+            self.covariate_encoder = build_covariate_encoder(
+                d_model, d_ff, n_heads, e_layers, dropout, factor, activation, use_rope,
+                self_channel_attn=covariate_self_channel_attn,
+                channel_attn_mode=channel_attn_mode,
+                total_channels=enc_in - series_dim,
+            )
+            self.covariate_calendar_decoder = (
+                TargetDecoder([
+                    TargetDecoderLayer(
+                        d_model, d_ff, n_heads,
+                        self.regular_covariates + calendar_channels,
+                        self.regular_covariates, dropout, factor, activation,
+                        use_rope, channel_attn_mode, channel_window,
+                        channel_summaries, local_time_rope,
+                        channel_fusion_mode, calendar_channels, channel_group_gating,
+                        channel_group_logit_bias,
+                    )
+                    for _ in range(e_layers)
+                ], d_model, channel_layers=(
+                    build_covariate_channel_layers(
+                        d_model, n_heads, e_layers, self.regular_covariates,
+                        dropout, factor, channel_attn_mode,
+                    ) if covariate_self_channel_attn else None
+                ))
+                if covariate_calendar_attn else None
+            )
+            self.target_decoder = TargetDecoder([
+                TargetDecoderLayer(
+                    d_model, d_ff, n_heads, enc_in, series_dim, dropout, factor,
+                    activation, use_rope, channel_attn_mode, channel_window,
+                    channel_summaries, local_time_rope, channel_fusion_mode, calendar_channels,
+                    channel_group_gating,
+                    channel_group_logit_bias,
+                ) for _ in range(e_layers)
+            ], d_model)
+            if share_temporal_attn:
+                # Tie modules, not copies: both streams accumulate gradients into
+                # the same Q/K/V/output projections at each matching depth.
+                # LayerNorm, FFN and different depths remain independent.
+                for index, target_layer in enumerate(self.target_decoder.layers):
+                    attention = target_layer.time_attention
+                    self.covariate_encoder.attn_layers[index].attention = attention
+                    if self.covariate_calendar_decoder is not None:
+                        self.covariate_calendar_decoder.layers[index].time_attention = attention
+            if self.covariate_calendar_decoder is not None:
+                # Both streams use the same learned channel-attention transforms.
+                # Their layouts, masks and variable embeddings remain separate.
+                for index, layer in enumerate(self.covariate_calendar_decoder.layers):
+                    layer.cross_attention.share_attention_projections_from(
+                        self.target_decoder.layers[index].cross_attention
+                    )
+        else:
+            self.encoder_x = self._build_encoder(
+                d_model=d_model, d_ff=d_ff, n_heads=n_heads, dropout=dropout, activation=activation, output_attention=False,
+                factor=factor, e_layers=e_layers, use_rope=use_rope
+            )
 
         # self.x_projector = CompressAndProject(self.series_dim, self.seq_len, d_model)
         # self.exog_projector = CompressAndProject(enc_in - series_dim, self.seq_len, d_model)
@@ -154,7 +285,7 @@ class TemporalCausalityEncoder(nn.Module):
         if not self.use_future_exog:
             self.exog_future = nn.Parameter(
                 # torch.randn(args.num_classes, bottle_dim // 1)
-                torch.randn(1, self.c_in - self.series_dim, future_patch_num, d_model)
+                torch.randn(1, self.regular_covariates, future_patch_num, d_model)
                 # torch.randn(args.num_classes, out_dim * self.c_in)
             )
             self.exog_head = nn.Sequential(
@@ -163,15 +294,34 @@ class TemporalCausalityEncoder(nn.Module):
             )
         
 
-    def forward(self, x, exog_future, use_exog=True):
+    def _patch_observation_mask(self, batch, channels, length, observed, reference):
+        """Build masks with the same right padding and unfolding as value patches."""
+        mask = reference.new_full((batch, channels, length), float(observed))
+        mask = F.pad(mask, (0, self.x_patch_embedding.patch_len))
+        return mask.unfold(
+            dimension=-1,
+            size=self.x_patch_embedding.patch_len,
+            step=self.x_patch_embedding.stride,
+        )
+
+    def forward(self, x, exog_future, use_exog=True, input_mark=None, target_mark=None):
         exog_history = x[:, :, self.series_dim:]
         x_history = x[:, :, :self.series_dim]
 
         _, _, EXOG_D = exog_history.shape
         B, L, X_D = x_history.shape
+        if EXOG_D != self.regular_covariates:
+            raise ValueError("Unexpected number of regular covariates")
+        if self.calendar_channels:
+            if (input_mark is None or target_mark is None
+                    or input_mark.shape != (B, L, self.calendar_channels)
+                    or target_mark.ndim != 3 or target_mark.shape[0] != B
+                    or target_mark.shape[1] < self.pred_len
+                    or target_mark.shape[2] != self.calendar_channels):
+                raise ValueError("use_calendar_exog requires aligned historical and future time marks")
 
         # print(f"{exog_history.shape = }, {exog_future.shape = }")
-        if self.use_future_exog:
+        if self.use_future_exog and EXOG_D:
             exog_history = torch.cat([exog_history, exog_future], dim=-2)
         # print(f"{exog_history.shape = }")
 
@@ -195,7 +345,11 @@ class TemporalCausalityEncoder(nn.Module):
         # patch_x, x_vars = self.patch_embedding(x_history)
 
         # patch_exog, exog_vars = self.exog_patch_embedding(exog_history)
-        if self.use_future_exog:
+        if EXOG_D == 0:
+            # Calendar-only conditioning needs no ordinary covariate embedding.
+            patch_count = L // self.x_patch_embedding.patch_len + 1 + self.x_future.shape[-2]
+            patch_exog = x.new_empty(B, 0, patch_count, self.x_future.shape[-1])
+        elif self.use_future_exog:
             exog_future = exog_history[:,:,L:]
             exog_history, exog_vars = self.x_patch_embedding(exog_history[:,:,:L])
             exog_future, exog_vars = self.x_patch_embedding(exog_future)
@@ -215,9 +369,42 @@ class TemporalCausalityEncoder(nn.Module):
         x_future = self.x_future.expand(B, -1, -1, -1)
         patch_x = torch.cat([patch_x, x_future], dim=-2)
         patch_exog = patch_exog.view(B, EXOG_D, patch_exog.shape[-2], patch_exog.shape[-1])
+        if self.patch_mask_embedding is not None:
+            target_mask = torch.cat((
+                self._patch_observation_mask(B, X_D, L, True, x),
+                self._patch_observation_mask(B, X_D, self.pred_len, False, x),
+            ), dim=-2)
+            regular_mask = torch.cat((
+                self._patch_observation_mask(B, EXOG_D, L, True, x),
+                self._patch_observation_mask(
+                    B, EXOG_D, self.pred_len, self.use_future_exog, x,
+                ),
+            ), dim=-2)
+        if self.calendar_channels:
+            # Time marks already use fixed calendar scaling. Avoid per-window
+            # centering, which would erase constant weekday/month information.
+            calendar_history, _ = self.x_patch_embedding(input_mark.to(x).transpose(1, 2))
+            calendar_future, _ = self.x_patch_embedding(target_mark[:, -self.pred_len:].to(x).transpose(1, 2))
+            calendar = torch.cat((calendar_history, calendar_future), dim=1)
+            calendar = calendar.reshape(B, self.calendar_channels, calendar.shape[-2], calendar.shape[-1])
+            patch_exog = torch.cat((patch_exog, calendar), dim=1)
+            if self.patch_mask_embedding is not None:
+                calendar_mask = torch.cat((
+                    self._patch_observation_mask(B, self.calendar_channels, L, True, x),
+                    self._patch_observation_mask(
+                        B, self.calendar_channels, self.pred_len, True, x,
+                    ),
+                ), dim=-2)
+                regular_mask = torch.cat((regular_mask, calendar_mask), dim=1)
+            EXOG_D += self.calendar_channels
         # print(f"{patch_x.shape = }, {patch_exog.shape = }")
 
         patch_x = torch.cat([patch_x, patch_exog], dim=1)
+        if self.patch_mask_embedding is not None:
+            patch_mask = torch.cat((target_mask, regular_mask), dim=1)
+            if patch_mask.shape[:3] != patch_x.shape[:3]:
+                raise RuntimeError("Patch mask and value patch layouts are not aligned")
+            patch_x = patch_x + self.patch_mask_embedding(patch_mask)
         # print(f"{patch_x.shape = }")
         patch_x = patch_x.view(-1, patch_x.shape[-2], patch_x.shape[-1])
         if not self.use_rope:
@@ -238,7 +425,70 @@ class TemporalCausalityEncoder(nn.Module):
         # attn_alpha = F.sigmoid(torch.einsum('bd,bd->b', x_history_projection, exog_history_projection)).view(-1, 1, 1, 1)
         # print("tc attn_alpha mean:", torch.mean(attn_alpha))
         # print(f"{patch_x.shape = }")
-        enc_x_out, _ = self.encoder_x(patch_x, self.c_in, exog_attns=None)
+        if self.architecture == "encoder_decoder":
+            patches = patch_x.reshape(B, self.c_in, patch_x.shape[-2], patch_x.shape[-1])
+            targets, covariates = patches[:, :X_D], patches[:, X_D:]
+            if self.covariate_calendar_decoder is not None:
+                regular = covariates[:, :self.regular_covariates]
+                calendar = covariates[:, self.regular_covariates:]
+                if self.calendar_temporal_attn:
+                    calendar_flat, _, calendar_final_flat = self.covariate_encoder.forward_intermediates(
+                        calendar.reshape(B * self.calendar_channels,
+                                         calendar.shape[-2], calendar.shape[-1]),
+                        self.calendar_channels,
+                        range(self.regular_covariates, EXOG_D),
+                    )
+                    calendar_memories = [item.reshape_as(calendar) for item in calendar_flat]
+                    calendar_final = calendar_final_flat.reshape_as(calendar)
+                else:
+                    calendar_memories = [calendar] * len(self.target_decoder.layers)
+                    calendar_final = calendar
+                regular_memories, regular_final = self.covariate_calendar_decoder.forward_intermediates(
+                    regular, calendar_memories,
+                )
+                memories = [
+                    torch.cat((regular_memory, calendar_memory), dim=1)
+                    for regular_memory, calendar_memory
+                    in zip(regular_memories, calendar_memories)
+                ]
+                covariate_output = torch.cat(
+                    (regular_final, calendar_final), dim=1,
+                )
+            elif self.calendar_channels and not self.calendar_temporal_attn:
+                # Keep deterministic calendar features strictly patch-local.
+                # Ordinary covariates retain the configured temporal encoder.
+                regular = covariates[:, :self.regular_covariates]
+                calendar = covariates[:, self.regular_covariates:]
+                if self.regular_covariates:
+                    regular_flat, _, regular_final_flat = self.covariate_encoder.forward_intermediates(
+                        regular.reshape(B * self.regular_covariates,
+                                        regular.shape[-2], regular.shape[-1]),
+                        self.regular_covariates,
+                    )
+                    regular_memories = [item.reshape_as(regular) for item in regular_flat]
+                    regular_final = regular_final_flat.reshape_as(regular)
+                    memories = [
+                        torch.cat((regular_memory, calendar), dim=1)
+                        for regular_memory in regular_memories
+                    ]
+                    covariate_output = torch.cat(
+                        (regular_final, calendar), dim=1,
+                    )
+                else:
+                    memories = [calendar] * len(self.target_decoder.layers)
+                    covariate_output = calendar
+            else:
+                memory_flat, _, covariate_output_flat = self.covariate_encoder.forward_intermediates(
+                    covariates.reshape(B * EXOG_D, covariates.shape[-2], covariates.shape[-1]), EXOG_D,
+                )
+                memories = [item.reshape_as(covariates) for item in memory_flat]
+                covariate_output = covariate_output_flat.reshape_as(covariates)
+            targets = self.target_decoder(targets, memories)
+            # Targets read time-only memories; the auxiliary covariate head reads
+            # the complete final state after channel attention and the FFN.
+            enc_x_out = torch.cat((targets, covariate_output), dim=1)
+        else:
+            enc_x_out, _ = self.encoder_x(patch_x, self.c_in, exog_attns=None)
         # print(f"{enc_x_out.shape = }")
 
         # enc_exog_out = torch.reshape(
@@ -248,7 +498,7 @@ class TemporalCausalityEncoder(nn.Module):
             enc_x_out, (B, -1, enc_x_out.shape[-2], enc_x_out.shape[-1])
         ) #.permute(0, 1, 3, 2)
         # print(f"{enc_x_out.shape = }")
-        exog_out = enc_x_out[:,X_D:,x_history_L:]
+        exog_out = enc_x_out[:,X_D:X_D + self.regular_covariates,x_history_L:]
         if self.predict_method == 'future_patch':
             enc_x_out = enc_x_out[:,:X_D,x_history_L:]
             # enc_x_out = enc_x_out[:,:,x_history_L:].permute(0, 3, 2, 1)
@@ -285,7 +535,7 @@ class TemporalCausalityEncoder(nn.Module):
 
         if not self.use_future_exog:
             exog_out = self.exog_head(exog_out)
-            exog_out = exog_out.view(B, EXOG_D, -1)
+            exog_out = exog_out.flatten(start_dim=2)
             exog_out = exog_out[:,:,:self.pred_len]
 
             exog_out = exog_out.permute(0, 2, 1)
@@ -301,6 +551,10 @@ class TemporalCausalityEncoder(nn.Module):
         return x_out, exog_out
 
     def _build_encoder(self, d_model, d_ff, n_heads, dropout, activation, output_attention, factor, e_layers, use_rope=False):
+        # Keep projection dimensions identical across modes, including odd head sizes.
+        channel_head_dim = d_model // n_heads
+        if use_rope:
+            channel_head_dim += channel_head_dim % 2
         return Encoder(
             [
                 EncoderLayer(
@@ -324,12 +578,27 @@ class TemporalCausalityEncoder(nn.Module):
                         ),
                         d_model,
                         n_heads,
-                        use_rope=use_rope,
-                    ),
+                        d_keys=channel_head_dim,
+                        d_values=channel_head_dim,
+                        use_rope=use_rope and self.channel_attn_mode == "rope",
+                    ) if self.channel_attn_type == "full" else None,
                     d_model,
                     d_ff,
                     dropout=dropout,
                     activation=activation,
+                    temporal_attn_scope=self.temporal_attn_scope,
+                    target_channels=self.series_dim,
+                    n_channels=self.c_in if self.channel_attn_type == "full" and self.channel_attn_mode == "embedding" else None,
+                    local_channel_attention=LocalSummaryAttention(
+                        d_model, n_heads, self.c_in, self.series_dim,
+                        window=self.channel_window, summaries=self.channel_summaries,
+                        mode=self.channel_attn_mode, dropout=dropout, head_dim=channel_head_dim,
+                        local_time_rope=self.local_time_rope,
+                        channel_fusion_mode=self.channel_fusion_mode,
+                        calendar_channels=self.calendar_channels,
+                        channel_group_gating=self.channel_group_gating,
+                        channel_group_logit_bias=self.channel_group_logit_bias,
+                    ) if self.channel_attn_type == "local_summary" else None,
                 )
                 for _ in range(e_layers)
             ],

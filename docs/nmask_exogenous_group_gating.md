@@ -1,4 +1,4 @@
-# NMask2 外生时间信息分组门控
+# NMask 外生时间信息分组门控
 
 对应实现参数：`"channel_group_gating": true`。默认值为 `false`；关闭时保持原有的局部 patch 与 Exo-Summaries 联合 softmax。
 

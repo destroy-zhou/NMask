@@ -47,9 +47,15 @@ events.out.tfevents.*
 *.safetensors
 /实验结果.xlsx
 /screenlog.0
+/README0.md
 /LICENSE
 /tests/
 /paper/
+
+# Chronos2 integration
+/ts_benchmark/baselines/chronos2/
+/scripts/download_chronos2.py
+/scripts/covariate_forecasting/Chronos2.sh
 
 # Editor and operating-system files
 .idea/

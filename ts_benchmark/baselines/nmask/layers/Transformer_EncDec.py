@@ -24,11 +24,20 @@ class ConvLayer(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, attention, c_attention, d_model, d_ff=None, dropout=0.1, activation="relu"):
+    def __init__(self, attention, c_attention, d_model, d_ff=None, dropout=0.1, activation="relu",
+                 n_channels=None, local_channel_attention=None,
+                 temporal_attn_scope="all", target_channels=None):
         super(EncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention = attention
         self.c_attention = c_attention
+        self.local_channel_attention = local_channel_attention
+        if temporal_attn_scope not in ("all", "target_only"):
+            raise ValueError("temporal_attn_scope must be all or target_only")
+        if temporal_attn_scope == "target_only" and (target_channels is None or target_channels <= 0):
+            raise ValueError("target_only requires positive target_channels")
+        self.temporal_attn_scope = temporal_attn_scope
+        self.target_channels = target_channels
         self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
         self.norm1 = nn.LayerNorm(d_model)
@@ -36,26 +45,60 @@ class EncoderLayer(nn.Module):
         self.c_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
+        self.channel_embedding = None
+        if n_channels is not None:
+            if n_channels <= 0:
+                raise ValueError("n_channels must be positive")
+            self.channel_embedding = nn.Parameter(torch.empty(1, n_channels, d_model))
+            nn.init.normal_(self.channel_embedding, std=0.02)
         # self.attn_cw = nn.Parameter(torch.tensor([1.0, 1.0]))
         # self.alpha = nn.Parameter(torch.tensor(1.0))
 
-    def forward(self, x, c, exog_attn=None, attn_alpha=0.5, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, c, exog_attn=None, attn_alpha=0.5, attn_mask=None,
+                tau=None, delta=None, stop_after_time=False):
         _, l, d = x.shape
+        temporal_input = x
+        if self.temporal_attn_scope == "target_only":
+            if self.target_channels > c:
+                raise ValueError("target_channels exceeds the channel count")
+            patches = x.reshape(-1, c, l, d)
+            temporal_input = patches[:, :self.target_channels].reshape(-1, l, d)
         new_x, attn = self.attention(
-            x, x, x,
+            temporal_input, temporal_input, temporal_input,
             exog_attn=exog_attn,
             attn_alpha=attn_alpha,
             attn_mask=attn_mask,
             tau=tau, delta=delta
         )
-        x = x + self.dropout(new_x)
+        if self.temporal_attn_scope == "target_only":
+            targets = temporal_input + self.dropout(new_x)
+            x = torch.cat((targets.reshape(-1, self.target_channels, l, d),
+                           patches[:, self.target_channels:]), dim=1).reshape(-1, l, d)
+        else:
+            x = x + self.dropout(new_x)
         # y = x = self.norm1(x)
         x = self.norm1(x)
+        if stop_after_time:
+            return x, attn
 
-        if self.c_attention is not None:
+        if self.local_channel_attention is not None:
+            patches = x.reshape(-1, c, l, d)
+            update = self.local_channel_attention(patches)
+            targets = self.local_channel_attention.target_channels
+            updated_targets = self.c_norm(patches[:, :targets] + self.dropout(update))
+            # Only targets receive cross-variable updates; covariates retain their features.
+            x = torch.cat([updated_targets, patches[:, targets:]], dim=1).reshape(-1, l, d)
+            y = x
+        elif self.c_attention is not None:
             x = x.view(-1, c, l, d).permute(0,2,1,3).contiguous().view(-1, c, d)
+            qk = x
+            if self.channel_embedding is not None:
+                if c != self.channel_embedding.shape[1]:
+                    raise ValueError("Channel count does not match the learned variable embeddings")
+                # Add identity only to Q/K; values and residual retain content features.
+                qk = x + self.channel_embedding
             new_x, attn = self.c_attention(
-                x, x, x,
+                qk, qk, x,
                 exog_attn=exog_attn,
                 attn_alpha=attn_alpha,
                 attn_mask=attn_mask,
@@ -96,10 +139,14 @@ class EncoderLayer(nn.Module):
         # x = x + self.dropout(new_x)
         # y = x = self.norm1(x)
 
+        return self.feed_forward(x, y), attn
+
+    def feed_forward(self, x, source=None):
+        """Apply the layer FFN to a state that has completed attention."""
+        y = x if source is None else source
         y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
         y = self.dropout(self.conv2(y).transpose(-1, 1))
-
-        return self.norm2(x + y), attn
+        return self.norm2(x + y)
 
 
 class Encoder(nn.Module):
